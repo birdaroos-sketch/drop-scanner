@@ -126,15 +126,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="panel-body">
       <div class="field">
-        <label>Keywords <span class="hint">— type and press Enter to add, click × to remove</span></label>
+        <label>Keyword groups <span class="hint">— one chip = a group. ALL words in a chip must be in the title (AND); a product matches if ANY chip matches (OR). e.g. "pokemon prismatic" then "pokemon ascended"</span></label>
         <div class="kwbox" id="kwbox">
-          <input type="text" id="kwInput" placeholder="add keyword…" autocomplete="off">
+          <input type="text" id="kwInput" placeholder="e.g. pokemon prismatic — Enter to add…" autocomplete="off">
         </div>
       </div>
       <div class="field">
-        <label>Negative keywords <span class="hint">— products matching ANY of these are excluded from results</span></label>
+        <label>Negative groups <span class="hint">— a title is excluded if ALL words in any chip appear in it. e.g. "sword shield"</span></label>
         <div class="kwbox" id="negKwbox">
-          <input type="text" id="negKwInput" placeholder="add exclusion keyword…" autocomplete="off">
+          <input type="text" id="negKwInput" placeholder="e.g. sword shield — Enter to add…" autocomplete="off">
         </div>
       </div>
       <div class="row2">

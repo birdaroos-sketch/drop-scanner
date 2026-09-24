@@ -237,13 +237,19 @@ def classify(hit: dict) -> dict:
         overall, str(hit.get("tags", "")), json.dumps(reasons),
     ])).lower()
 
-    # Keywords match against title only — tags/reasons would cause false positives.
-    kw_text     = _norm(str(hit.get("title", ""))).lower()
-    matched     = [k for k in keywords if k in kw_text]
-    neg_matched = [k for k in neg_keywords if k in kw_text]
-    # AND logic: EVERY positive keyword must be present in the title to qualify.
-    # (empty keyword list => all products qualify)
-    kw_ok       = all(k in kw_text for k in keywords)
+    # Keyword GROUPS match against the title only. One chip = one group whose
+    # space-separated terms must ALL appear in the title (AND within a group).
+    # A product qualifies if ANY group matches (OR across groups).
+    kw_text = _norm(str(hit.get("title", ""))).lower()
+
+    def _group_matches(group: str) -> bool:
+        terms = group.split()
+        return bool(terms) and all(t in kw_text for t in terms)
+
+    matched     = [g for g in keywords if _group_matches(g)]
+    neg_matched = [g for g in neg_keywords if _group_matches(g)]
+    # empty keyword list => all products qualify
+    kw_ok       = (not keywords) or bool(matched)
 
     return {
         "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
@@ -364,7 +370,10 @@ scan_now_event = asyncio.Event()
 
 async def run_one_scan(client: httpx.AsyncClient) -> None:
     keywords = config["keywords"]
-    queries  = keywords if keywords else [""]
+    # Query each unique term across all groups for broad recall; the group
+    # AND/OR filter in classify() then narrows to real matches.
+    terms   = sorted({t for g in keywords for t in g.split()})
+    queries = terms if terms else [""]
     merged: dict[str, dict] = {}
 
     for q in queries:
