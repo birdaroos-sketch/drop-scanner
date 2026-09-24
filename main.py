@@ -74,13 +74,13 @@ MAX_RESULTS_CAP = 1000
 
 def _env_defaults() -> dict:
     return {
-        "keywords":     [k.strip().lower() for k in os.environ.get("KEYWORDS", "pokemon tcg,delta reign").split(",") if k.strip()],
-        "neg_keywords": [],
+        "keywords":     [k.strip().lower() for k in os.environ.get("KEYWORDS", "").split(",") if k.strip()],
+        "neg_keywords": [k.strip().lower() for k in os.environ.get("NEG_KEYWORDS", "").split(",") if k.strip()],
         "interval":     int(os.environ.get("SCAN_INTERVAL", "300")),
         "max_results":  int(os.environ.get("MAX_RESULTS", "200")),
         "webhook":      os.environ.get("DISCORD_WEBHOOK", "").strip(),
         "paused":       False,
-        "manual_only":  False,
+        "manual_only":  os.environ.get("MANUAL_ONLY", "").strip().lower() in ("1", "true", "yes"),
     }
 
 config: dict = _env_defaults()
