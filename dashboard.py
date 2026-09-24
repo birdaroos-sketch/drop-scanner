@@ -21,6 +21,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn:hover{filter:brightness(1.08)}
   .btn.ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
   .btn.ghost:hover{border-color:var(--muted2)}
+  .btn.manual{background:rgba(245,197,24,.15);color:var(--accent);border:1px solid rgba(245,197,24,.4)}
+  .btn.manual:hover{background:rgba(245,197,24,.25)}
   .btn.danger{background:transparent;color:var(--accent2);border:1px solid rgba(255,68,68,.35)}
   .btn.danger:hover{background:rgba(255,68,68,.1)}
   .btn:disabled{opacity:.4;cursor:not-allowed}
@@ -50,6 +52,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip{display:inline-flex;align-items:center;gap:6px;background:rgba(245,197,24,.1);color:var(--accent);border:1px solid rgba(245,197,24,.3);border-radius:3px;font-family:var(--font);font-size:11px;padding:3px 8px}
   .chip b{cursor:pointer;font-weight:700;opacity:.7}
   .chip b:hover{opacity:1}
+  .nchip{display:inline-flex;align-items:center;gap:6px;background:rgba(255,68,68,.1);color:var(--accent2);border:1px solid rgba(255,68,68,.25);border-radius:3px;font-family:var(--font);font-size:11px;padding:3px 8px}
+  .nchip b{cursor:pointer;font-weight:700;opacity:.7}
+  .nchip b:hover{opacity:1}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   @media(max-width:560px){.row2{grid-template-columns:1fr}}
   .save-row{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
@@ -99,6 +104,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="status" id="status">connecting…</div>
   <div class="actions">
     <button class="btn ghost" id="pauseBtn">PAUSE</button>
+    <button class="btn ghost" id="modeBtn">MANUAL MODE</button>
     <button class="btn" id="scanNow">SCAN NOW</button>
   </div>
 </div>
@@ -125,9 +131,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <input type="text" id="kwInput" placeholder="add keyword…" autocomplete="off">
         </div>
       </div>
+      <div class="field">
+        <label>Negative keywords <span class="hint">— products matching ANY of these are excluded from results</span></label>
+        <div class="kwbox" id="negKwbox">
+          <input type="text" id="negKwInput" placeholder="add exclusion keyword…" autocomplete="off">
+        </div>
+      </div>
       <div class="row2">
         <div class="field">
-          <label>Scan interval <span class="hint">— seconds (min 15)</span></label>
+          <label>Scan interval <span class="hint">— seconds (min 15, disabled in manual mode)</span></label>
           <input type="number" id="intervalInput" min="15" step="5">
         </div>
         <div class="field">
@@ -187,7 +199,9 @@ let sortKey = 'last_seen';
 let sortDir = -1;
 let rowsCache = [];
 let keywords = [];
+let negKeywords = [];
 let nextScanTs = null;
+let manualMode = false;
 
 function toast(msg, kind){
   const t = document.getElementById('toast');
@@ -236,28 +250,69 @@ document.getElementById('kwInput').addEventListener('keydown',e=>{
   }
 });
 
+// ── negative keyword chips ─────────────────────────────────────────────────
+function renderNegChips(){
+  const box = document.getElementById('negKwbox');
+  box.querySelectorAll('.nchip').forEach(c=>c.remove());
+  const input = document.getElementById('negKwInput');
+  negKeywords.forEach((k,i)=>{
+    const el = document.createElement('span');
+    el.className = 'nchip';
+    el.innerHTML = '⊘ ' + k.replace(/</g,'&lt;') + ' <b data-i="'+i+'">×</b>';
+    box.insertBefore(el, input);
+  });
+  box.querySelectorAll('.nchip b').forEach(b=>b.addEventListener('click',()=>{
+    negKeywords.splice(+b.dataset.i,1); renderNegChips();
+  }));
+}
+document.getElementById('negKwInput').addEventListener('keydown',e=>{
+  if(e.key==='Enter'||e.key===','){
+    e.preventDefault();
+    const v = e.target.value.trim().toLowerCase();
+    if(v && !negKeywords.includes(v)){ negKeywords.push(v); }
+    e.target.value=''; renderNegChips();
+  }else if(e.key==='Backspace' && !e.target.value && negKeywords.length){
+    negKeywords.pop(); renderNegChips();
+  }
+});
+
 // ── settings panel ─────────────────────────────────────────────────────────
 document.getElementById('settingsHead').addEventListener('click',()=>{
   document.getElementById('settingsPanel').classList.toggle('open');
 });
 
+function applyManualModeUI(isManual){
+  const modeBtn = document.getElementById('modeBtn');
+  const intervalInput = document.getElementById('intervalInput');
+  modeBtn.textContent = isManual ? 'AUTO MODE' : 'MANUAL MODE';
+  modeBtn.className = isManual ? 'btn manual' : 'btn ghost';
+  intervalInput.disabled = isManual;
+  intervalInput.style.opacity = isManual ? '0.4' : '1';
+}
+
 async function loadConfig(){
   try{
     const c = await fetch(url('/api/config')).then(r=>r.json());
     keywords = (c.keywords||[]).slice();
+    negKeywords = (c.neg_keywords||[]).slice();
     renderChips();
+    renderNegChips();
     document.getElementById('intervalInput').value = c.interval;
     document.getElementById('maxInput').value = c.max_results;
     document.getElementById('whHint').textContent = c.webhook_set ? ('— set ('+c.webhook_hint+')') : '— none set';
+    manualMode = !!c.manual_only;
+    applyManualModeUI(manualMode);
   }catch(e){}
 }
 
 document.getElementById('saveBtn').addEventListener('click',async()=>{
-  // stash any half-typed keyword
   const pend = document.getElementById('kwInput').value.trim().toLowerCase();
   if(pend && !keywords.includes(pend)){ keywords.push(pend); document.getElementById('kwInput').value=''; renderChips(); }
+  const negPend = document.getElementById('negKwInput').value.trim().toLowerCase();
+  if(negPend && !negKeywords.includes(negPend)){ negKeywords.push(negPend); document.getElementById('negKwInput').value=''; renderNegChips(); }
   const body = {
     keywords,
+    neg_keywords: negKeywords,
     interval: +document.getElementById('intervalInput').value,
     max_results: +document.getElementById('maxInput').value,
   };
@@ -274,7 +329,6 @@ document.getElementById('saveBtn').addEventListener('click',async()=>{
 });
 
 document.getElementById('testBtn').addEventListener('click',async()=>{
-  // If they typed a new webhook but haven't saved, save it first.
   const wh = document.getElementById('webhookInput').value.trim();
   if(wh){
     await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({webhook:wh})});
@@ -298,9 +352,18 @@ document.getElementById('pauseBtn').addEventListener('click',async()=>{
   }catch(e){ toast('failed','err'); }
 });
 
+document.getElementById('modeBtn').addEventListener('click',async()=>{
+  const newMode = !manualMode;
+  try{
+    await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({manual_only:newMode})});
+    toast(newMode ? 'switched to manual mode — Scan Now to run a scan' : 'switched to auto mode','ok');
+    await tick();
+  }catch(e){ toast('failed to change mode','err'); }
+});
+
 document.getElementById('scanNow').addEventListener('click',async()=>{
   const btn=document.getElementById('scanNow'); btn.disabled=true; btn.textContent='SCANNING…';
-  try{ await fetch(url('/api/control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'scan'})}); toast('scan complete','ok'); }
+  try{ await fetch(url('/api/control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'scan'})}); toast('scan triggered','ok'); }
   catch(e){ toast('scan failed','err'); }
   btn.disabled=false; btn.textContent='SCAN NOW';
   await tick();
@@ -341,8 +404,10 @@ document.querySelectorAll('.fb').forEach(b=>b.addEventListener('click',()=>{
 async function loadStatus(){
   try{
     const s = await fetch(url('/api/status')).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
+    manualMode = !!s.manual_only;
+    applyManualModeUI(manualMode);
     document.getElementById('sScans').textContent = s.scans;
-    document.getElementById('sInterval').textContent = s.interval>=60 ? Math.round(s.interval/60)+'m' : s.interval+'s';
+    document.getElementById('sInterval').textContent = manualMode ? 'manual' : (s.interval>=60 ? Math.round(s.interval/60)+'m' : s.interval+'s');
     document.getElementById('sLast').textContent = aest(s.last_scan);
     nextScanTs = s.next_scan ? new Date(s.next_scan).getTime() : null;
     const pauseBtn=document.getElementById('pauseBtn');
@@ -358,7 +423,8 @@ async function loadStatus(){
     }else{
       pauseBtn.textContent='PAUSE'; pauseBtn.dataset.paused='0';
       document.getElementById('dot').className='dot live';
-      document.getElementById('status').textContent='live · '+(s.keywords||[]).join(', ')+' · every '+(s.interval>=60?Math.round(s.interval/60)+'min':s.interval+'s');
+      const modeStr = manualMode ? 'manual mode' : 'every '+(s.interval>=60?Math.round(s.interval/60)+'min':s.interval+'s');
+      document.getElementById('status').textContent='live · '+(s.keywords||[]).join(', ')+' · '+modeStr;
     }
   }catch(e){
     document.getElementById('dot').className='dot err';
@@ -370,6 +436,7 @@ function tickCountdown(){
   const el=document.getElementById('sNext');
   const pauseBtn=document.getElementById('pauseBtn');
   if(pauseBtn.dataset.paused==='1'){ el.textContent='paused'; return; }
+  if(manualMode){ el.textContent='manual'; return; }
   if(!nextScanTs){ el.textContent='—'; return; }
   const secs=Math.max(0,Math.round((nextScanTs-Date.now())/1000));
   const m=Math.floor(secs/60), s=secs%60;
@@ -400,7 +467,6 @@ function renderRows(){
     if(typeof x==='number' && typeof y==='number') return (x-y)*sortDir;
     return String(x).localeCompare(String(y))*sortDir;
   });
-  // sort arrows
   document.querySelectorAll('#headRow th[data-k]').forEach(th=>{
     const base=th.textContent.replace(/[▲▼]\s*$/,'').trim();
     th.innerHTML = base + (th.dataset.k===sortKey ? ' <span class="arr">'+(sortDir>0?'▲':'▼')+'</span>' : '');

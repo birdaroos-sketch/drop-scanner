@@ -6,9 +6,10 @@ Architecture:
     (server-side, no CSP/CORS limits — that was the whole problem with the
     browser artifact).
   - Results persisted in SQLite so they survive restarts/redeploys.
-  - Runtime config (keywords, interval, max_results, webhook, paused) is stored
-    in SQLite too, so edits from the dashboard survive restarts. Env vars only
-    seed the defaults on first boot with an empty DB.
+  - Runtime config (keywords, neg_keywords, interval, max_results, webhook,
+    paused, manual_only) is stored in SQLite too, so edits from the dashboard
+    survive restarts. Env vars only seed the defaults on first boot with an
+    empty DB.
   - Discord webhook fires when a NEW hidden SKU appears or a tracked SKU changes
     status (e.g. Embargo -> ComingSoon -> Available = the drop signal).
   - Dashboard served from the same origin, so its fetch() to /api/* has no CORS.
@@ -66,21 +67,25 @@ MAX_RESULTS_CAP = 1000
 def _env_defaults() -> dict:
     return {
         "keywords":     [k.strip().lower() for k in os.environ.get("KEYWORDS", "pokemon tcg,delta reign").split(",") if k.strip()],
+        "neg_keywords": [],
         "interval":     int(os.environ.get("SCAN_INTERVAL", "300")),
         "max_results":  int(os.environ.get("MAX_RESULTS", "200")),
         "webhook":      os.environ.get("DISCORD_WEBHOOK", "").strip(),
         "paused":       False,
+        "manual_only":  False,
     }
 
 config: dict = _env_defaults()
 
 
 def clamp_config(c: dict) -> dict:
-    c["interval"]    = max(MIN_INTERVAL, min(MAX_INTERVAL, int(c.get("interval", 300))))
-    c["max_results"] = max(MIN_RESULTS, min(MAX_RESULTS_CAP, int(c.get("max_results", 200))))
-    c["keywords"]    = [k.strip().lower() for k in c.get("keywords", []) if k.strip()]
-    c["paused"]      = bool(c.get("paused", False))
-    c["webhook"]     = (c.get("webhook") or "").strip()
+    c["interval"]     = max(MIN_INTERVAL, min(MAX_INTERVAL, int(c.get("interval", 300))))
+    c["max_results"]  = max(MIN_RESULTS, min(MAX_RESULTS_CAP, int(c.get("max_results", 200))))
+    c["keywords"]     = [k.strip().lower() for k in c.get("keywords", []) if k.strip()]
+    c["neg_keywords"] = [k.strip().lower() for k in c.get("neg_keywords", []) if k.strip()]
+    c["paused"]       = bool(c.get("paused", False))
+    c["manual_only"]  = bool(c.get("manual_only", False))
+    c["webhook"]      = (c.get("webhook") or "").strip()
     return c
 
 
@@ -94,7 +99,10 @@ def load_config() -> None:
     if raw:
         try:
             saved = json.loads(raw)
-            config.update({k: saved[k] for k in ("keywords", "interval", "max_results", "webhook", "paused") if k in saved})
+            config.update({k: saved[k] for k in (
+                "keywords", "neg_keywords", "interval", "max_results",
+                "webhook", "paused", "manual_only",
+            ) if k in saved})
         except Exception as e:
             print(f"[config] failed to load saved config: {e}", flush=True)
     clamp_config(config)
@@ -195,11 +203,12 @@ def pick_image(hit: dict) -> str:
 
 def classify(hit: dict) -> dict:
     """Turn a raw Algolia hit into a normalized product record with hidden flags."""
-    avail   = hit.get("availability") or {}
-    flags   = [f.get("Name", "") for f in (hit.get("product") or {}).get("productFlags", [])]
-    overall = avail.get("overallStatus", "") or ""
-    now_ts  = datetime.now(timezone.utc).timestamp()
-    keywords = config["keywords"]
+    avail    = hit.get("availability") or {}
+    flags    = [f.get("Name", "") for f in (hit.get("product") or {}).get("productFlags", [])]
+    overall  = avail.get("overallStatus", "") or ""
+    now_ts   = datetime.now(timezone.utc).timestamp()
+    keywords     = config["keywords"]
+    neg_keywords = config.get("neg_keywords", [])
 
     reasons = []
     if hit.get("isPublic") is False:            reasons.append("isPublic=false")
@@ -215,13 +224,13 @@ def classify(hit: dict) -> dict:
     if is_coming:
         reasons.append(f"release:{rd_str}")
 
-    matched = keywords[:] if not keywords else [
-        k for k in keywords
-        if k in " ".join([
-            str(hit.get("title", "")), str(hit.get("sku", "")),
-            overall, str(hit.get("tags", "")), json.dumps(reasons)
-        ]).lower()
-    ]
+    search_text = " ".join([
+        str(hit.get("title", "")), str(hit.get("sku", "")),
+        overall, str(hit.get("tags", "")), json.dumps(reasons),
+    ]).lower()
+
+    matched     = keywords[:] if not keywords else [k for k in keywords if k in search_text]
+    neg_matched = [k for k in neg_keywords if k in search_text]
 
     return {
         "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
@@ -234,6 +243,7 @@ def classify(hit: dict) -> dict:
         "is_coming":    1 if is_coming else 0,
         "reasons":      json.dumps(reasons),
         "matched":      json.dumps(matched),
+        "neg_matched":  json.dumps(neg_matched),
         "handle":       hit.get("handle") or "",
         "image":        pick_image(hit),
     }
@@ -332,15 +342,15 @@ scan_state = {
     "last_scan": None,
     "last_error": None,
     "total_products": 0,
-    "next_scan": None,   # ISO timestamp of the next scheduled scan
+    "next_scan": None,
 }
 
-scan_now_event = asyncio.Event()   # set() to trigger an immediate scan
+scan_now_event = asyncio.Event()
 
 
 async def run_one_scan(client: httpx.AsyncClient) -> None:
     keywords = config["keywords"]
-    queries = keywords if keywords else [""]
+    queries  = keywords if keywords else [""]
     merged: dict[str, dict] = {}
 
     for q in queries:
@@ -354,6 +364,8 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             rec = classify(h)
             if keywords and not json.loads(rec["matched"]):
                 continue
+            if json.loads(rec.get("neg_matched", "[]")):
+                continue  # blocked by a negative keyword
             merged[rec["sku"]] = rec
 
     now = datetime.now(timezone.utc).isoformat()
@@ -393,8 +405,6 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
 
     footer_time = aest_now_str()
 
-    # New hidden SKUs — one rich embed per product (capped so the first big scan
-    # doesn't flood the channel / hit Discord's rate limit).
     for rec in new_hidden[:10]:
         await discord_post(
             client,
@@ -405,7 +415,6 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
     if len(new_hidden) > 10:
         await discord_post(client, f"🆕 **+{len(new_hidden) - 10} more new hidden SKUs** (first 10 shown above)", [])
 
-    # Status changes — green + loud when a tracked SKU flips to Available (the drop).
     for rec, prev in status_changes:
         now_status = (rec["status"] or "").lower()
         is_drop = now_status in ("available", "instock")
@@ -442,28 +451,33 @@ async def scan_loop() -> None:
     scan_state["running"] = True
     async with httpx.AsyncClient() as client:
         while True:
-            if not config["paused"]:
+            # Auto-scan only when not paused AND not in manual-only mode.
+            if not config["paused"] and not config["manual_only"]:
                 try:
                     await run_one_scan(client)
                 except Exception as e:
                     print(f"[loop] scan failed: {e}", flush=True)
 
-            # Sleep in 1s steps up to config["interval"], so interval changes,
-            # pause toggles, and manual "scan now" take effect promptly.
             interval = config["interval"]
             nxt = time.time() + interval
             scan_state["next_scan"] = (
-                None if config["paused"]
+                None if config["paused"] or config["manual_only"]
                 else datetime.fromtimestamp(nxt, timezone.utc).isoformat()
             )
+
+            # Sleep in 1s steps; scan_now_event wakes us for a manual trigger.
             waited = 0
             while waited < interval:
                 if scan_now_event.is_set():
                     scan_now_event.clear()
+                    if not config["paused"]:
+                        try:
+                            await run_one_scan(client)
+                        except Exception as e:
+                            print(f"[loop] manual scan failed: {e}", flush=True)
                     break
                 await asyncio.sleep(1)
                 waited += 1
-                # Re-read interval each second so shortening it applies live.
                 interval = config["interval"]
 
 
@@ -479,7 +493,9 @@ async def lifespan(app: FastAPI):
         yield
         return
     task = asyncio.create_task(scan_loop())
-    print(f"[boot] scan loop started — every {config['interval']}s, keywords={config['keywords']}, paused={config['paused']}", flush=True)
+    print(f"[boot] scan loop started — every {config['interval']}s, "
+          f"keywords={config['keywords']}, neg_keywords={config['neg_keywords']}, "
+          f"paused={config['paused']}, manual_only={config['manual_only']}", flush=True)
     yield
     task.cancel()
 
@@ -496,13 +512,14 @@ def check_token(request: Request) -> None:
 
 
 def public_config() -> dict:
-    # Never expose the full webhook URL — just whether one is set + a masked tail.
     wh = config["webhook"]
     return {
         "keywords":     config["keywords"],
+        "neg_keywords": config["neg_keywords"],
         "interval":     config["interval"],
         "max_results":  config["max_results"],
         "paused":       config["paused"],
+        "manual_only":  config["manual_only"],
         "webhook_set":  bool(wh),
         "webhook_hint": ("…" + wh[-6:]) if wh else "",
     }
@@ -512,17 +529,19 @@ def public_config() -> dict:
 async def api_status(request: Request):
     check_token(request)
     return {
-        "running": scan_state["running"],
-        "paused": config["paused"],
-        "scans": scan_state["scans"],
-        "last_scan": scan_state["last_scan"] or get_meta("last_scan"),
-        "next_scan": scan_state["next_scan"],
-        "last_error": scan_state["last_error"],
+        "running":        scan_state["running"],
+        "paused":         config["paused"],
+        "manual_only":    config["manual_only"],
+        "scans":          scan_state["scans"],
+        "last_scan":      scan_state["last_scan"] or get_meta("last_scan"),
+        "next_scan":      scan_state["next_scan"],
+        "last_error":     scan_state["last_error"],
         "total_products": scan_state["total_products"],
-        "interval": config["interval"],
-        "max_results": config["max_results"],
-        "keywords": config["keywords"],
-        "index": ALGOLIA_INDEX,
+        "interval":       config["interval"],
+        "max_results":    config["max_results"],
+        "keywords":       config["keywords"],
+        "neg_keywords":   config["neg_keywords"],
+        "index":          ALGOLIA_INDEX,
     }
 
 
@@ -545,6 +564,11 @@ async def api_set_config(request: Request):
         if isinstance(kw, str):
             kw = [k for k in kw.split(",")]
         config["keywords"] = [str(k).strip().lower() for k in kw if str(k).strip()]
+    if "neg_keywords" in body:
+        nk = body["neg_keywords"]
+        if isinstance(nk, str):
+            nk = [k for k in nk.split(",")]
+        config["neg_keywords"] = [str(k).strip().lower() for k in nk if str(k).strip()]
     if "interval" in body:
         try:    config["interval"] = int(body["interval"])
         except (TypeError, ValueError): raise HTTPException(status_code=400, detail="interval must be a number (seconds)")
@@ -555,6 +579,10 @@ async def api_set_config(request: Request):
         config["webhook"] = str(body["webhook"] or "").strip()
     if "paused" in body:
         config["paused"] = bool(body["paused"])
+    if "manual_only" in body:
+        config["manual_only"] = bool(body["manual_only"])
+        if config["manual_only"]:
+            scan_state["next_scan"] = None
 
     clamp_config(config)
     save_config()
@@ -576,13 +604,13 @@ async def api_control(request: Request):
         return {"ok": True, "paused": True}
     if action == "resume":
         config["paused"] = False; save_config()
-        scan_now_event.set()
+        if not config["manual_only"]:
+            scan_now_event.set()
         return {"ok": True, "paused": False}
     if action in ("scan", "scan_now"):
         if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
             raise HTTPException(status_code=400, detail="Algolia creds not configured")
-        async with httpx.AsyncClient() as client:
-            await run_one_scan(client)
+        scan_now_event.set()
         return {"ok": True, "scans": scan_state["scans"]}
     raise HTTPException(status_code=400, detail="action must be pause | resume | scan")
 
@@ -592,12 +620,10 @@ async def api_scan_now(request: Request):
     check_token(request)
     if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
         raise HTTPException(status_code=400, detail="Algolia creds not configured")
-    async with httpx.AsyncClient() as client:
-        await run_one_scan(client)
+    scan_now_event.set()
     return {"ok": True, "scans": scan_state["scans"]}
 
 
-# Keep the old GET /api/scan-now working (the previous dashboard called it).
 @app.get("/api/scan-now")
 async def api_scan_now_get(request: Request):
     return await api_scan_now(request)
