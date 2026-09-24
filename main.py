@@ -420,6 +420,14 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
         await discord_post(client, head, [embed])
         await asyncio.sleep(0.35)
 
+    if not new_hidden and not status_changes:
+        kw_str = ", ".join(config["keywords"]) if config["keywords"] else "all"
+        await discord_post(
+            client,
+            f"🔍 **Scan #{scan_state['scans'] + 1} — nothing new** · {len(merged)} products checked · keywords: {kw_str} · [{footer_time} AEST]",
+            [],
+        )
+
     scan_state["scans"] += 1
     scan_state["last_scan"] = now
     scan_state["last_error"] = None
