@@ -33,6 +33,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,13 @@ DB_PATH = DB_DIR / "scanner.db"
 
 ATTRS = ("sku,title,price,published_at,release_date,isPublic,availability,product,tags,handle,"
          "image,images,product_image,featured_image,image_url,imageUrl,thumbnail,media")
+
+def _norm(s: str) -> str:
+    """Strip accents and replace & with 'and' so keyword matching is accent/symbol-agnostic."""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.replace("&", " and ").replace("  ", " ")
+
 
 # Bounds so a bad dashboard input can't wedge the loop.
 MIN_INTERVAL = 15
@@ -81,8 +89,8 @@ config: dict = _env_defaults()
 def clamp_config(c: dict) -> dict:
     c["interval"]     = max(MIN_INTERVAL, min(MAX_INTERVAL, int(c.get("interval", 300))))
     c["max_results"]  = max(MIN_RESULTS, min(MAX_RESULTS_CAP, int(c.get("max_results", 200))))
-    c["keywords"]     = [k.strip().lower() for k in c.get("keywords", []) if k.strip()]
-    c["neg_keywords"] = [k.strip().lower() for k in c.get("neg_keywords", []) if k.strip()]
+    c["keywords"]     = [_norm(k).strip().lower() for k in c.get("keywords", []) if k.strip()]
+    c["neg_keywords"] = [_norm(k).strip().lower() for k in c.get("neg_keywords", []) if k.strip()]
     c["paused"]       = bool(c.get("paused", False))
     c["manual_only"]  = bool(c.get("manual_only", False))
     c["webhook"]      = (c.get("webhook") or "").strip()
@@ -224,10 +232,10 @@ def classify(hit: dict) -> dict:
     if is_coming:
         reasons.append(f"release:{rd_str}")
 
-    search_text = " ".join([
+    search_text = _norm(" ".join([
         str(hit.get("title", "")), str(hit.get("sku", "")),
         overall, str(hit.get("tags", "")), json.dumps(reasons),
-    ]).lower()
+    ])).lower()
 
     matched     = keywords[:] if not keywords else [k for k in keywords if k in search_text]
     neg_matched = [k for k in neg_keywords if k in search_text]
