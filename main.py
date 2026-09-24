@@ -29,6 +29,7 @@ import csv
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -51,7 +52,8 @@ PORT            = int(os.environ.get("PORT", "8000"))
 DB_DIR  = Path("/data") if Path("/data").is_dir() else Path(".")
 DB_PATH = DB_DIR / "scanner.db"
 
-ATTRS = "sku,title,price,published_at,release_date,isPublic,availability,product,tags,handle"
+ATTRS = ("sku,title,price,published_at,release_date,isPublic,availability,product,tags,handle,"
+         "image,images,product_image,featured_image,image_url,imageUrl,thumbnail,media")
 
 # Bounds so a bad dashboard input can't wedge the loop.
 MIN_INTERVAL = 15
@@ -159,6 +161,38 @@ async def fetch_algolia(client: httpx.AsyncClient, query: str) -> list[dict]:
     return r.json().get("hits", [])
 
 
+def pick_image(hit: dict) -> str:
+    """Find a product image URL in a raw Algolia hit, whatever field it lives under."""
+    def first_url(v):
+        if isinstance(v, str) and v.startswith("http"):
+            return v
+        if isinstance(v, list) and v:
+            f = v[0]
+            if isinstance(f, str) and f.startswith("http"):
+                return f
+            if isinstance(f, dict):
+                for k in ("url", "src", "link", "image", "originalSrc"):
+                    if isinstance(f.get(k), str) and f[k].startswith("http"):
+                        return f[k]
+        if isinstance(v, dict):
+            for k in ("url", "src", "link"):
+                if isinstance(v.get(k), str) and v[k].startswith("http"):
+                    return v[k]
+        return ""
+
+    for key in ("image", "product_image", "featured_image", "image_url", "imageUrl",
+                "thumbnail", "images", "media"):
+        u = first_url(hit.get(key))
+        if u:
+            return u
+    prod = hit.get("product") or {}
+    for key in ("image", "featured_image", "image_url", "imageUrl", "images", "media"):
+        u = first_url(prod.get(key))
+        if u:
+            return u
+    return ""
+
+
 def classify(hit: dict) -> dict:
     """Turn a raw Algolia hit into a normalized product record with hidden flags."""
     avail   = hit.get("availability") or {}
@@ -201,17 +235,91 @@ def classify(hit: dict) -> dict:
         "reasons":      json.dumps(reasons),
         "matched":      json.dumps(matched),
         "handle":       hit.get("handle") or "",
+        "image":        pick_image(hit),
     }
 
 
 # ── discord ────────────────────────────────────────────────────────────────
 
+COLOR_HIDDEN = 0x8B5CF6   # violet — new hidden SKU
+COLOR_DROP   = 0x22C55E   # green — flipped to available (the drop)
+COLOR_CHANGE = 0xF5C518   # amber — other status change
+
+_STATUS_LABELS = {
+    "InStock": "In Stock", "NoLongerAvailable": "No Longer Available",
+    "ComingSoon": "Coming Soon", "PreOrder": "Pre-Order", "Available": "Available",
+}
+
+
+def friendly_status(status: str) -> str:
+    if not status:
+        return "Unknown"
+    if status in _STATUS_LABELS:
+        return _STATUS_LABELS[status]
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", status)
+
+
+def keyword_label(rec: dict) -> str:
+    try:
+        kws = json.loads(rec.get("matched") or "[]")
+    except Exception:
+        kws = []
+    if not kws:
+        return ""
+    return kws[0].title().replace("Tcg", "TCG") + " "
+
+
+def aest_now_str() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%H:%M:%S")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%H:%M:%S") + " UTC"
+
+
+def build_embed(rec: dict, color: int, footer_time: str) -> dict:
+    url = f"https://www.jbhifi.com.au/products/{rec['handle']}" if rec.get("handle") else None
+    embed = {
+        "author": {"name": "JB Hi-Fi"},
+        "title": (rec.get("title") or "—")[:250],
+        "color": color,
+        "fields": [
+            {"name": "📦 Stock",      "value": friendly_status(rec.get("status")) or "—", "inline": True},
+            {"name": "👁️ Visibility", "value": "🙈 HIDDEN" if rec.get("is_hidden") else "👀 Visible", "inline": True},
+            {"name": "💰 Price",      "value": (f"${rec['price']}" if rec.get("price") else "—"), "inline": True},
+            {"name": "🏷️ SKU",        "value": f"`{rec.get('sku', '—')}`", "inline": True},
+            {"name": "📅 Release",    "value": (rec.get("release_date") or "—"), "inline": True},
+            {"name": "🔢 Limit",      "value": (str(rec["limit_per"]) if rec.get("limit_per") else "—"), "inline": True},
+        ],
+        "footer": {"text": f"Drop Scanner · JB Hi-Fi watch [{footer_time}]"},
+    }
+    if url:
+        embed["url"] = url
+        embed["description"] = f"🛒 [Open on JB Hi-Fi]({url})"
+    if rec.get("image"):
+        embed["thumbnail"] = {"url": rec["image"]}
+    return embed
+
+
+async def discord_post(client: httpx.AsyncClient, content: str, embeds: list[dict]) -> None:
+    if not config["webhook"]:
+        return
+    payload = {"username": "Drop Scanner", "content": content[:1900]}
+    if embeds:
+        payload["embeds"] = embeds[:10]
+    try:
+        await client.post(config["webhook"], json=payload, timeout=10)
+    except Exception as e:
+        print(f"[discord] alert failed: {e}", flush=True)
+
+
 async def discord_send(client: httpx.AsyncClient, title: str, lines: list[str]) -> None:
+    """Plain-text alert, kept for the /api/test-discord endpoint."""
     if not config["webhook"]:
         return
     content = f"**{title}**\n" + "\n".join(lines)
     try:
-        await client.post(config["webhook"], json={"content": content[:1900]}, timeout=10)
+        await client.post(config["webhook"], json={"username": "Drop Scanner", "content": content[:1900]}, timeout=10)
     except Exception as e:
         print(f"[discord] alert failed: {e}", flush=True)
 
@@ -283,19 +391,34 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                     rec["handle"], now, rec["status"], rec["sku"],
                 ))
 
-    if new_hidden:
-        await discord_send(client, f"🆕 {len(new_hidden)} new hidden SKU(s)", [
-            f"`{r['sku']}` {r['title'][:60]} — **{r['status']}**"
-            + (f" · release {r['release_date']}" if r['release_date'] else "")
-            + (f" · limit {r['limit_per']}" if r['limit_per'] else "")
-            for r in new_hidden[:10]
-        ])
+    footer_time = aest_now_str()
+
+    # New hidden SKUs — one rich embed per product (capped so the first big scan
+    # doesn't flood the channel / hit Discord's rate limit).
+    for rec in new_hidden[:10]:
+        await discord_post(
+            client,
+            f"🆕 **New hidden {keyword_label(rec)}SKU**",
+            [build_embed(rec, COLOR_HIDDEN, footer_time)],
+        )
+        await asyncio.sleep(0.35)
+    if len(new_hidden) > 10:
+        await discord_post(client, f"🆕 **+{len(new_hidden) - 10} more new hidden SKUs** (first 10 shown above)", [])
+
+    # Status changes — green + loud when a tracked SKU flips to Available (the drop).
     for rec, prev in status_changes:
-        await discord_send(client, "🔔 Status change", [
-            f"`{rec['sku']}` {rec['title'][:60]}",
-            f"{prev} → **{rec['status']}**"
-            + (f" · https://www.jbhifi.com.au/products/{rec['handle']}" if rec['handle'] else ""),
-        ])
+        now_status = (rec["status"] or "").lower()
+        is_drop = now_status in ("available", "instock")
+        embed = build_embed(rec, COLOR_DROP if is_drop else COLOR_CHANGE, footer_time)
+        embed["fields"].insert(0, {
+            "name": "🔀 Change",
+            "value": f"{friendly_status(prev)} → **{friendly_status(rec['status'])}**",
+            "inline": False,
+        })
+        head = (f"🟢 **DROP — {rec['title'][:80]} is now available!**"
+                if is_drop else "🔔 **Status change**")
+        await discord_post(client, head, [embed])
+        await asyncio.sleep(0.35)
 
     scan_state["scans"] += 1
     scan_state["last_scan"] = now
