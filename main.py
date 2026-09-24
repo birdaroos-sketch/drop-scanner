@@ -1,15 +1,19 @@
 """
-Drop Scanner â always-on hidden SKU monitor for Railway.
+Drop Scanner — always-on hidden SKU monitor for Railway.
 
 Architecture:
-  - Background asyncio loop polls Algolia every SCAN_INTERVAL seconds (server-side,
-    no CSP/CORS limits â that was the whole problem with the browser artifact).
+  - Background asyncio loop polls Algolia every config["interval"] seconds
+    (server-side, no CSP/CORS limits — that was the whole problem with the
+    browser artifact).
   - Results persisted in SQLite so they survive restarts/redeploys.
+  - Runtime config (keywords, interval, max_results, webhook, paused) is stored
+    in SQLite too, so edits from the dashboard survive restarts. Env vars only
+    seed the defaults on first boot with an empty DB.
   - Discord webhook fires when a NEW hidden SKU appears or a tracked SKU changes
     status (e.g. Embargo -> ComingSoon -> Available = the drop signal).
   - Dashboard served from the same origin, so its fetch() to /api/* has no CORS.
 
-Config via environment variables (set these in Railway):
+Env vars (seed first-boot defaults; after that the dashboard is the source of truth):
   ALGOLIA_APP_ID     required   e.g. VTVKM5URPX
   ALGOLIA_API_KEY    required   e.g. a0c0108d737ad5ab54a0e2da900bf040
   ALGOLIA_INDEX      optional   default shopify_products_families
@@ -17,10 +21,12 @@ Config via environment variables (set these in Railway):
   SCAN_INTERVAL      optional   seconds, default 300 (5 min)
   MAX_RESULTS        optional   per keyword query, default 200
   DISCORD_WEBHOOK    optional   full webhook URL for alerts
-  DASHBOARD_TOKEN    optional   if set, dashboard + API require ?token=... to view
+  DASHBOARD_TOKEN    optional   if set, dashboard + all write endpoints require ?token=...
 """
 
 import asyncio
+import csv
+import io
 import json
 import os
 import sqlite3
@@ -31,17 +37,13 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-# ââ config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── static config (never editable at runtime) ───────────────────────────────
 
 ALGOLIA_APP_ID  = os.environ.get("ALGOLIA_APP_ID", "").strip()
 ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "").strip()
 ALGOLIA_INDEX   = os.environ.get("ALGOLIA_INDEX", "shopify_products_families").strip()
-KEYWORDS        = [k.strip().lower() for k in os.environ.get("KEYWORDS", "pokemon tcg,delta reign").split(",") if k.strip()]
-SCAN_INTERVAL   = int(os.environ.get("SCAN_INTERVAL", "300"))
-MAX_RESULTS     = int(os.environ.get("MAX_RESULTS", "200"))
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 PORT            = int(os.environ.get("PORT", "8000"))
 
@@ -51,7 +53,52 @@ DB_PATH = DB_DIR / "scanner.db"
 
 ATTRS = "sku,title,price,published_at,release_date,isPublic,availability,product,tags,handle"
 
-# ââ db âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# Bounds so a bad dashboard input can't wedge the loop.
+MIN_INTERVAL = 15
+MAX_INTERVAL = 86_400
+MIN_RESULTS  = 1
+MAX_RESULTS_CAP = 1000
+
+# ── runtime config (editable from the dashboard, persisted in DB) ────────────
+
+def _env_defaults() -> dict:
+    return {
+        "keywords":     [k.strip().lower() for k in os.environ.get("KEYWORDS", "pokemon tcg,delta reign").split(",") if k.strip()],
+        "interval":     int(os.environ.get("SCAN_INTERVAL", "300")),
+        "max_results":  int(os.environ.get("MAX_RESULTS", "200")),
+        "webhook":      os.environ.get("DISCORD_WEBHOOK", "").strip(),
+        "paused":       False,
+    }
+
+config: dict = _env_defaults()
+
+
+def clamp_config(c: dict) -> dict:
+    c["interval"]    = max(MIN_INTERVAL, min(MAX_INTERVAL, int(c.get("interval", 300))))
+    c["max_results"] = max(MIN_RESULTS, min(MAX_RESULTS_CAP, int(c.get("max_results", 200))))
+    c["keywords"]    = [k.strip().lower() for k in c.get("keywords", []) if k.strip()]
+    c["paused"]      = bool(c.get("paused", False))
+    c["webhook"]     = (c.get("webhook") or "").strip()
+    return c
+
+
+def save_config() -> None:
+    set_meta("config", json.dumps(config))
+
+
+def load_config() -> None:
+    """Overlay any saved config from the DB onto the env-seeded defaults."""
+    raw = get_meta("config", "")
+    if raw:
+        try:
+            saved = json.loads(raw)
+            config.update({k: saved[k] for k in ("keywords", "interval", "max_results", "webhook", "paused") if k in saved})
+        except Exception as e:
+            print(f"[config] failed to load saved config: {e}", flush=True)
+    clamp_config(config)
+
+
+# ── db ───────────────────────────────────────────────────────────────────────
 
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -98,11 +145,11 @@ def get_meta(key: str, default: str = "") -> str:
         return row["value"] if row else default
 
 
-# ââ algolia fetch ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── algolia fetch ──────────────────────────────────────────────────────────
 
 async def fetch_algolia(client: httpx.AsyncClient, query: str) -> list[dict]:
     url = f"https://{ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/{ALGOLIA_INDEX}"
-    params = {"query": query, "hitsPerPage": MAX_RESULTS, "attributesToRetrieve": ATTRS}
+    params = {"query": query, "hitsPerPage": config["max_results"], "attributesToRetrieve": ATTRS}
     headers = {
         "X-Algolia-Application-Id": ALGOLIA_APP_ID,
         "X-Algolia-API-Key": ALGOLIA_API_KEY,
@@ -118,6 +165,7 @@ def classify(hit: dict) -> dict:
     flags   = [f.get("Name", "") for f in (hit.get("product") or {}).get("productFlags", [])]
     overall = avail.get("overallStatus", "") or ""
     now_ts  = datetime.now(timezone.utc).timestamp()
+    keywords = config["keywords"]
 
     reasons = []
     if hit.get("isPublic") is False:            reasons.append("isPublic=false")
@@ -133,8 +181,8 @@ def classify(hit: dict) -> dict:
     if is_coming:
         reasons.append(f"release:{rd_str}")
 
-    matched = KEYWORDS[:] if not KEYWORDS else [
-        k for k in KEYWORDS
+    matched = keywords[:] if not keywords else [
+        k for k in keywords
         if k in " ".join([
             str(hit.get("title", "")), str(hit.get("sku", "")),
             overall, str(hit.get("tags", "")), json.dumps(reasons)
@@ -142,8 +190,8 @@ def classify(hit: dict) -> dict:
     ]
 
     return {
-        "sku":          str(hit.get("sku") or hit.get("objectID") or "â"),
-        "title":        hit.get("title") or "â",
+        "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
+        "title":        hit.get("title") or "—",
         "price":        hit.get("price"),
         "status":       overall or ("Hidden" if hit.get("isPublic") is False else "Unknown"),
         "release_date": rd_str or "",
@@ -156,19 +204,19 @@ def classify(hit: dict) -> dict:
     }
 
 
-# ââ discord ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── discord ────────────────────────────────────────────────────────────────
 
-async def discord_alert(client: httpx.AsyncClient, title: str, lines: list[str]) -> None:
-    if not DISCORD_WEBHOOK:
+async def discord_send(client: httpx.AsyncClient, title: str, lines: list[str]) -> None:
+    if not config["webhook"]:
         return
     content = f"**{title}**\n" + "\n".join(lines)
     try:
-        await client.post(DISCORD_WEBHOOK, json={"content": content[:1900]}, timeout=10)
+        await client.post(config["webhook"], json={"content": content[:1900]}, timeout=10)
     except Exception as e:
         print(f"[discord] alert failed: {e}", flush=True)
 
 
-# ââ scan loop ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── scan loop ──────────────────────────────────────────────────────────────
 
 scan_state = {
     "running": False,
@@ -176,11 +224,15 @@ scan_state = {
     "last_scan": None,
     "last_error": None,
     "total_products": 0,
+    "next_scan": None,   # ISO timestamp of the next scheduled scan
 }
+
+scan_now_event = asyncio.Event()   # set() to trigger an immediate scan
 
 
 async def run_one_scan(client: httpx.AsyncClient) -> None:
-    queries = KEYWORDS if KEYWORDS else [""]
+    keywords = config["keywords"]
+    queries = keywords if keywords else [""]
     merged: dict[str, dict] = {}
 
     for q in queries:
@@ -192,7 +244,7 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             raise
         for h in hits:
             rec = classify(h)
-            if KEYWORDS and not json.loads(rec["matched"]):
+            if keywords and not json.loads(rec["matched"]):
                 continue
             merged[rec["sku"]] = rec
 
@@ -232,17 +284,17 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                 ))
 
     if new_hidden:
-        await discord_alert(client, f"ð {len(new_hidden)} new hidden SKU(s)", [
-            f"`{r['sku']}` {r['title'][:60]} â **{r['status']}**"
-            + (f" Â· release {r['release_date']}" if r['release_date'] else "")
-            + (f" Â· limit {r['limit_per']}" if r['limit_per'] else "")
+        await discord_send(client, f"🆕 {len(new_hidden)} new hidden SKU(s)", [
+            f"`{r['sku']}` {r['title'][:60]} — **{r['status']}**"
+            + (f" · release {r['release_date']}" if r['release_date'] else "")
+            + (f" · limit {r['limit_per']}" if r['limit_per'] else "")
             for r in new_hidden[:10]
         ])
     for rec, prev in status_changes:
-        await discord_alert(client, "ð Status change", [
+        await discord_send(client, "🔔 Status change", [
             f"`{rec['sku']}` {rec['title'][:60]}",
-            f"{prev} â **{rec['status']}**"
-            + (f" Â· https://www.jbhifi.com.au/products/{rec['handle']}" if rec['handle'] else ""),
+            f"{prev} → **{rec['status']}**"
+            + (f" · https://www.jbhifi.com.au/products/{rec['handle']}" if rec['handle'] else ""),
         ])
 
     scan_state["scans"] += 1
@@ -251,7 +303,7 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
     scan_state["total_products"] = len(merged)
     set_meta("last_scan", now)
     set_meta("scan_count", str(scan_state["scans"]))
-    print(f"[scan] #{scan_state['scans']} â {len(merged)} matched, "
+    print(f"[scan] #{scan_state['scans']} — {len(merged)} matched, "
           f"{len(new_hidden)} new hidden, {len(status_changes)} status changes", flush=True)
 
 
@@ -259,25 +311,44 @@ async def scan_loop() -> None:
     scan_state["running"] = True
     async with httpx.AsyncClient() as client:
         while True:
-            try:
-                await run_one_scan(client)
-            except Exception as e:
-                print(f"[loop] scan failed: {e}", flush=True)
-            await asyncio.sleep(SCAN_INTERVAL)
+            if not config["paused"]:
+                try:
+                    await run_one_scan(client)
+                except Exception as e:
+                    print(f"[loop] scan failed: {e}", flush=True)
+
+            # Sleep in 1s steps up to config["interval"], so interval changes,
+            # pause toggles, and manual "scan now" take effect promptly.
+            interval = config["interval"]
+            nxt = time.time() + interval
+            scan_state["next_scan"] = (
+                None if config["paused"]
+                else datetime.fromtimestamp(nxt, timezone.utc).isoformat()
+            )
+            waited = 0
+            while waited < interval:
+                if scan_now_event.is_set():
+                    scan_now_event.clear()
+                    break
+                await asyncio.sleep(1)
+                waited += 1
+                # Re-read interval each second so shortening it applies live.
+                interval = config["interval"]
 
 
-# ââ app ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── app ────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    load_config()
     scan_state["scans"] = int(get_meta("scan_count", "0") or "0")
     if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
-        print("[boot] WARNING: ALGOLIA_APP_ID / ALGOLIA_API_KEY not set â scan loop idle", flush=True)
+        print("[boot] WARNING: ALGOLIA_APP_ID / ALGOLIA_API_KEY not set — scan loop idle", flush=True)
         yield
         return
     task = asyncio.create_task(scan_loop())
-    print(f"[boot] scan loop started â every {SCAN_INTERVAL}s, keywords={KEYWORDS}", flush=True)
+    print(f"[boot] scan loop started — every {config['interval']}s, keywords={config['keywords']}, paused={config['paused']}", flush=True)
     yield
     task.cancel()
 
@@ -293,19 +364,122 @@ def check_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="bad or missing ?token=")
 
 
+def public_config() -> dict:
+    # Never expose the full webhook URL — just whether one is set + a masked tail.
+    wh = config["webhook"]
+    return {
+        "keywords":     config["keywords"],
+        "interval":     config["interval"],
+        "max_results":  config["max_results"],
+        "paused":       config["paused"],
+        "webhook_set":  bool(wh),
+        "webhook_hint": ("…" + wh[-6:]) if wh else "",
+    }
+
+
 @app.get("/api/status")
 async def api_status(request: Request):
     check_token(request)
     return {
         "running": scan_state["running"],
+        "paused": config["paused"],
         "scans": scan_state["scans"],
         "last_scan": scan_state["last_scan"] or get_meta("last_scan"),
+        "next_scan": scan_state["next_scan"],
         "last_error": scan_state["last_error"],
         "total_products": scan_state["total_products"],
-        "interval": SCAN_INTERVAL,
-        "keywords": KEYWORDS,
+        "interval": config["interval"],
+        "max_results": config["max_results"],
+        "keywords": config["keywords"],
         "index": ALGOLIA_INDEX,
     }
+
+
+@app.get("/api/config")
+async def api_get_config(request: Request):
+    check_token(request)
+    return public_config()
+
+
+@app.post("/api/config")
+async def api_set_config(request: Request):
+    check_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+
+    if "keywords" in body:
+        kw = body["keywords"]
+        if isinstance(kw, str):
+            kw = [k for k in kw.split(",")]
+        config["keywords"] = [str(k).strip().lower() for k in kw if str(k).strip()]
+    if "interval" in body:
+        try:    config["interval"] = int(body["interval"])
+        except (TypeError, ValueError): raise HTTPException(status_code=400, detail="interval must be a number (seconds)")
+    if "max_results" in body:
+        try:    config["max_results"] = int(body["max_results"])
+        except (TypeError, ValueError): raise HTTPException(status_code=400, detail="max_results must be a number")
+    if "webhook" in body:
+        config["webhook"] = str(body["webhook"] or "").strip()
+    if "paused" in body:
+        config["paused"] = bool(body["paused"])
+
+    clamp_config(config)
+    save_config()
+    return {"ok": True, "config": public_config()}
+
+
+@app.post("/api/control")
+async def api_control(request: Request):
+    check_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    action = (body.get("action") or request.query_params.get("action") or "").lower()
+
+    if action == "pause":
+        config["paused"] = True; save_config()
+        scan_state["next_scan"] = None
+        return {"ok": True, "paused": True}
+    if action == "resume":
+        config["paused"] = False; save_config()
+        scan_now_event.set()
+        return {"ok": True, "paused": False}
+    if action in ("scan", "scan_now"):
+        if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
+            raise HTTPException(status_code=400, detail="Algolia creds not configured")
+        async with httpx.AsyncClient() as client:
+            await run_one_scan(client)
+        return {"ok": True, "scans": scan_state["scans"]}
+    raise HTTPException(status_code=400, detail="action must be pause | resume | scan")
+
+
+@app.post("/api/scan-now")
+async def api_scan_now(request: Request):
+    check_token(request)
+    if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
+        raise HTTPException(status_code=400, detail="Algolia creds not configured")
+    async with httpx.AsyncClient() as client:
+        await run_one_scan(client)
+    return {"ok": True, "scans": scan_state["scans"]}
+
+
+# Keep the old GET /api/scan-now working (the previous dashboard called it).
+@app.get("/api/scan-now")
+async def api_scan_now_get(request: Request):
+    return await api_scan_now(request)
+
+
+@app.post("/api/test-discord")
+async def api_test_discord(request: Request):
+    check_token(request)
+    if not config["webhook"]:
+        raise HTTPException(status_code=400, detail="no webhook configured")
+    async with httpx.AsyncClient() as client:
+        await discord_send(client, "✅ Drop Scanner test", ["Webhook is wired up and working."])
+    return {"ok": True}
 
 
 @app.get("/api/results")
@@ -332,14 +506,47 @@ async def api_results(request: Request, filter: str = Query("all")):
     return JSONResponse(out)
 
 
-@app.get("/api/scan-now")
-async def api_scan_now(request: Request):
+@app.delete("/api/results")
+async def api_clear_results(request: Request):
     check_token(request)
-    if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
-        raise HTTPException(status_code=400, detail="Algolia creds not configured")
-    async with httpx.AsyncClient() as client:
-        await run_one_scan(client)
-    return {"ok": True, "scans": scan_state["scans"]}
+    with db_conn() as c:
+        c.execute("DELETE FROM products")
+    scan_state["total_products"] = 0
+    return {"ok": True, "cleared": True}
+
+
+@app.delete("/api/results/{sku}")
+async def api_delete_result(request: Request, sku: str):
+    check_token(request)
+    with db_conn() as c:
+        cur = c.execute("DELETE FROM products WHERE sku=?", (sku,))
+        deleted = cur.rowcount
+    return {"ok": True, "deleted": deleted}
+
+
+@app.get("/api/export.csv")
+async def api_export_csv(request: Request, filter: str = Query("all")):
+    check_token(request)
+    where = ""
+    if filter == "hidden":  where = "WHERE is_hidden=1"
+    elif filter == "coming": where = "WHERE is_coming=1"
+    with db_conn() as c:
+        rows = c.execute(f"SELECT * FROM products {where} ORDER BY last_seen DESC").fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["sku", "title", "price", "status", "release_date", "limit_per",
+                "is_hidden", "is_coming", "reasons", "matched", "handle",
+                "first_seen", "last_seen"])
+    for r in rows:
+        w.writerow([
+            r["sku"], r["title"], r["price"], r["status"], r["release_date"], r["limit_per"],
+            r["is_hidden"], r["is_coming"],
+            " | ".join(json.loads(r["reasons"] or "[]")),
+            " | ".join(json.loads(r["matched"] or "[]")),
+            r["handle"], r["first_seen"], r["last_seen"],
+        ])
+    return PlainTextResponse(buf.getvalue(), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=drop-scanner.csv"})
 
 
 @app.get("/", response_class=HTMLResponse)
