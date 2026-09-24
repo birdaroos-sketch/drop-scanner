@@ -239,8 +239,11 @@ def classify(hit: dict) -> dict:
 
     # Keywords match against title only — tags/reasons would cause false positives.
     kw_text     = _norm(str(hit.get("title", ""))).lower()
-    matched     = keywords[:] if not keywords else [k for k in keywords if k in kw_text]
+    matched     = [k for k in keywords if k in kw_text]
     neg_matched = [k for k in neg_keywords if k in kw_text]
+    # AND logic: EVERY positive keyword must be present in the title to qualify.
+    # (empty keyword list => all products qualify)
+    kw_ok       = all(k in kw_text for k in keywords)
 
     return {
         "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
@@ -254,6 +257,7 @@ def classify(hit: dict) -> dict:
         "reasons":      json.dumps(reasons),
         "matched":      json.dumps(matched),
         "neg_matched":  json.dumps(neg_matched),
+        "kw_ok":        kw_ok,
         "handle":       hit.get("handle") or "",
         "image":        pick_image(hit),
     }
@@ -372,10 +376,10 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             raise
         for h in hits:
             rec = classify(h)
-            if keywords and not json.loads(rec["matched"]):
-                continue
+            if not rec["kw_ok"]:
+                continue  # title is missing one or more required keywords (AND)
             if json.loads(rec.get("neg_matched", "[]")):
-                continue  # blocked by a negative keyword
+                continue  # title contains an excluded keyword
             merged[rec["sku"]] = rec
 
     now = datetime.now(timezone.utc).isoformat()
