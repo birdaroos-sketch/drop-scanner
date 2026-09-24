@@ -237,8 +237,10 @@ def classify(hit: dict) -> dict:
         overall, str(hit.get("tags", "")), json.dumps(reasons),
     ])).lower()
 
-    matched     = keywords[:] if not keywords else [k for k in keywords if k in search_text]
-    neg_matched = [k for k in neg_keywords if k in search_text]
+    # Keywords match against title only — tags/reasons would cause false positives.
+    kw_text     = _norm(str(hit.get("title", ""))).lower()
+    matched     = keywords[:] if not keywords else [k for k in keywords if k in kw_text]
+    neg_matched = [k for k in neg_keywords if k in kw_text]
 
     return {
         "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
