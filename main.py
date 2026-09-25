@@ -75,6 +75,8 @@ BIGW_ATTRS      = [
     "fulfilment.collection", "fulfilment.logisticType",
 ]
 # listingStatus values that mean "normally purchasable" (anything else => hidden)
+BIGW_PAGE_SIZE  = 100
+BIGW_MAX_PAGES  = 10
 BIGW_LISTED_OK  = {"LISTEDONLINEANDSTORE", "LISTEDONLINEONLY", "LISTEDINSTOREONLY"}
 
 def _norm(s: str) -> str:
@@ -338,26 +340,32 @@ def classify(hit: dict) -> dict:
 # ── BIG W fetch + classify ───────────────────────────────────────────────────
 
 async def fetch_bigw(client: httpx.AsyncClient, query: str) -> list[dict]:
+    """Search BIG W and follow every results page (a bare "pokemon" search runs to hundreds)."""
     if not query:
         return []
-    payload = {
-        "format": "1", "clientId": "web", "sessionId": "drop-scanner",
-        "page": 0, "perPage": min(config["max_results"], 100),
-        "sort": "relevance", "text": query,
-        "filter": {"inStock": False},   # include out-of-stock so we can catch restocks
-        "include": {
-            "facets": False, "additionalFacets": [], "suggestions": False,
-            "productAttributes": BIGW_ATTRS,
-        },
-    }
     headers = {
         "Content-Type": "application/json",
         "Origin": BIGW_BASE, "Referer": BIGW_BASE + "/", "User-Agent": BIGW_UA,
     }
-    r = await client.post(BIGW_SEARCH_URL, json=payload, headers=headers, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    return ((data.get("organic") or {}).get("results")) or []
+    out: list[dict] = []
+    for page in range(BIGW_MAX_PAGES):
+        payload = {
+            "format": "1", "clientId": "web", "sessionId": "drop-scanner",
+            "page": page, "perPage": BIGW_PAGE_SIZE,
+            "sort": "relevance", "text": query,
+            "filter": {"inStock": False},   # include out-of-stock so we can catch restocks
+            "include": {
+                "facets": False, "additionalFacets": [], "suggestions": False,
+                "productAttributes": BIGW_ATTRS,
+            },
+        }
+        r = await client.post(BIGW_SEARCH_URL, json=payload, headers=headers, timeout=20)
+        r.raise_for_status()
+        results = ((r.json().get("organic") or {}).get("results")) or []
+        out.extend(results)
+        if len(results) < BIGW_PAGE_SIZE:
+            break
+    return out
 
 
 def _bigw_slug(name: str) -> str:
@@ -572,11 +580,19 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             except Exception as e:
                 msg = f"jbhifi '{q}': {type(e).__name__}: {e}"
                 errors.append(msg); print(f"[scan] {msg}", flush=True)
+    # BIG W: search each keyword group as a phrase (its relevance ranking needs all the words).
+    for q in (keywords or [""]):
         if "bigw" in sources:
             try:
                 for h in await fetch_bigw(client, q):
                     rec = classify_bigw(h)
-                    if rec is not None and keep(rec):
+                    if rec is None:
+                        name = (h.get("information") or {}).get("name") or ""
+                        if match_keywords(name)[2]:
+                            vendor = ((h.get("information") or {}).get("vendors") or [{}])[0].get("name", "?")
+                            print(f"[scan] bigw skipped marketplace item: {name} (seller: {vendor})", flush=True)
+                        continue
+                    if keep(rec):
                         merged[f"bigw:{rec['sku']}"] = rec
             except Exception as e:
                 msg = f"bigw '{q}': {type(e).__name__}: {e}"
