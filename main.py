@@ -69,7 +69,7 @@ BIGW_UA         = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
                    "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
 BIGW_ATTRS      = [
     "identifiers",
-    "information.name", "information.brand", "information.media.image",
+    "information.name", "information.brand", "information.media.image", "information.vendors",
     "attributes.listingStatus", "attributes.maxQuantity", "attributes.condition",
     "prices.NAT", "fulfilment.preorder", "fulfilment.delivery",
     "fulfilment.collection", "fulfilment.logisticType",
@@ -187,7 +187,7 @@ def init_db() -> None:
         ).fetchone()
         if not exists:
             _create_products(c)
-            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('bigw_marketplace_purged','1')")
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('bigw_marketplace_purged_v2','1')")
             return
         cols = [r[1] for r in c.execute("PRAGMA table_info(products)")]
         if "id" not in cols:
@@ -210,12 +210,12 @@ def init_db() -> None:
             c.execute("ALTER TABLE products ADD COLUMN image TEXT")
     # One-time cleanup: remove all BIG W rows so marketplace items don't persist.
     # They will be re-discovered on the next scan with the marketplace filter active.
-    if get_meta("bigw_marketplace_purged", "") != "1":
+    if get_meta("bigw_marketplace_purged_v2", "") != "1":
         with db_conn() as c2:
             deleted = c2.execute("DELETE FROM products WHERE source='bigw'").rowcount
             if deleted:
                 print(f"[db] purged {deleted} BIG W rows (marketplace filter migration)", flush=True)
-        set_meta("bigw_marketplace_purged", "1")
+        set_meta("bigw_marketplace_purged_v2", "1")
 
 
 def set_meta(key: str, value: str) -> None:
@@ -360,40 +360,6 @@ async def fetch_bigw(client: httpx.AsyncClient, query: str) -> list[dict]:
     return ((data.get("organic") or {}).get("results")) or []
 
 
-async def _bigw_diagnostic(client: httpx.AsyncClient) -> None:
-    """Temporary: log BIG W fields that could identify marketplace sellers."""
-    pat = re.compile(r"seller|market|vendor|logistic|offer|partner|dropship|ship|fulfil|source|channel|supplier|type", re.I)
-    def leaves(o, path=""):
-        if isinstance(o, dict):
-            for k, v in o.items():
-                yield from leaves(v, f"{path}.{k}" if path else k)
-        elif isinstance(o, list):
-            for i, v in enumerate(o[:3]):
-                yield from leaves(v, f"{path}[{i}]")
-        else:
-            yield path, o
-    try:
-        payload = {"format": "1", "clientId": "web", "sessionId": "drop-scanner", "page": 0, "perPage": 60,
-                   "sort": "relevance", "text": "pokemon", "filter": {"inStock": False},
-                   "include": {"facets": True, "additionalFacets": [], "suggestions": False}}
-        headers = {"Content-Type": "application/json", "Origin": BIGW_BASE,
-                   "Referer": BIGW_BASE + "/", "User-Agent": BIGW_UA}
-        r = await client.post(BIGW_SEARCH_URL, json=payload, headers=headers, timeout=20)
-        data = r.json()
-        print(f"[diag] top-level keys: {list(data.keys())}", flush=True)
-        facets = data.get("facets") or []
-        print(f"[diag] facets: {json.dumps(facets)[:1500]}", flush=True)
-        hits = ((data.get("organic") or {}).get("results")) or []
-        if hits:
-            print(f"[diag] hit keys: {sorted(hits[0].keys())}", flush=True)
-        for h in hits:
-            name = ((h.get("information") or {}).get("name") or "")[:60]
-            fields = {p: v for p, v in leaves(h) if pat.search(p) and v not in (None, "", [], {})}
-            print(f"[diag] {name} :: {json.dumps(fields)[:700]}", flush=True)
-    except Exception as e:
-        print(f"[diag] failed: {type(e).__name__}: {e}", flush=True)
-
-
 def _bigw_slug(name: str) -> str:
     s = _norm(name).lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
@@ -408,8 +374,8 @@ def classify_bigw(hit: dict) -> dict | None:
     ful    = hit.get("fulfilment") or {}
     ident  = hit.get("identifiers") or {}
 
-    # Skip marketplace / third-party seller listings — website stock only
-    if (ful.get("logisticType") or "").upper() == "MARKETPLACE":
+    # Marketplace (third-party) sellers have vendor ids like "IMP-<uuid>"; BIG W's own stock uses numeric ids.
+    if any(str(v.get("id") or "").upper().startswith("IMP-") for v in (info.get("vendors") or [])):
         return None
     name   = info.get("name") or "—"
     sku    = str(ident.get("articleId") or ident.get("mpn") or "—")
@@ -745,10 +711,6 @@ async def lifespan(app: FastAPI):
         yield
         return
     task = asyncio.create_task(scan_loop())
-    async def _diag():
-        async with httpx.AsyncClient() as c:
-            await _bigw_diagnostic(c)
-    asyncio.create_task(_diag())
     print(f"[boot] scan loop started — every {config['interval']}s, sources={active_sources()}, "
           f"keywords={config['keywords']}, neg_keywords={config['neg_keywords']}, "
           f"paused={config['paused']}, manual_only={config['manual_only']}", flush=True)
