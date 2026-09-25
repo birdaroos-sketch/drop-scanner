@@ -87,6 +87,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .b-live{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.2)}
   .b-def{background:rgba(255,255,255,.05);color:var(--muted2);border:1px solid var(--border)}
   .kw{background:rgba(245,197,24,.08);color:rgba(245,197,24,.7);font-family:var(--font);font-size:10px;padding:1px 5px;border-radius:2px;margin-right:3px}
+  .store{display:inline-flex;padding:2px 7px;border-radius:3px;font-family:var(--font);font-size:10px;font-weight:700;white-space:nowrap}
+  .st-jb{background:rgba(59,130,246,.14);color:var(--blue);border:1px solid rgba(59,130,246,.3)}
+  .st-bw{background:rgba(34,197,94,.14);color:var(--green);border:1px solid rgba(34,197,94,.3)}
   .del{color:var(--muted);cursor:pointer;font-family:var(--font);font-weight:700;padding:2px 6px;border-radius:3px}
   .del:hover{color:var(--accent2);background:rgba(255,68,68,.1)}
   .empty{padding:60px;text-align:center;color:var(--muted);font-family:var(--font);font-size:12px}
@@ -148,6 +151,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="field">
+        <label>Retailers <span class="hint">— which stores to scan. Keyword groups apply to both. Toggles save instantly.</span></label>
+        <div class="actions" style="gap:8px;margin-top:2px">
+          <button class="btn ghost" id="jbToggle">JB HI-FI</button>
+          <button class="btn ghost" id="bwToggle">BIG W</button>
+        </div>
+      </div>
+      <div class="field">
         <label>Discord webhook <span class="hint" id="whHint"></span></label>
         <input type="text" id="webhookInput" placeholder="https://discord.com/api/webhooks/…" autocomplete="off">
       </div>
@@ -168,6 +178,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="fb" data-f="hidden">Hidden</button>
         <button class="fb" data-f="coming">Coming Soon</button>
       </div>
+      <div class="filters" id="srcFilters">
+        <button class="fb active" data-s="all">All stores</button>
+        <button class="fb" data-s="jbhifi">JB Hi-Fi</button>
+        <button class="fb" data-s="bigw">BIG W</button>
+      </div>
       <button class="btn ghost" id="exportBtn">EXPORT CSV</button>
       <button class="btn danger" id="clearBtn">CLEAR ALL</button>
     </div>
@@ -176,12 +191,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="table-wrap">
     <table>
       <thead><tr id="headRow">
-        <th data-k="sku">SKU</th><th data-k="title">Title</th><th data-k="price">Price</th>
+        <th data-k="source">Store</th><th data-k="sku">SKU</th><th data-k="title">Title</th><th data-k="price">Price</th>
         <th data-k="status">Status</th><th data-k="release_date">Release</th>
         <th data-k="limit_per">Limit</th><th data-k="matched">Keywords</th>
         <th data-k="first_seen">First seen (AEST)</th><th></th>
       </tr></thead>
-      <tbody id="body"><tr><td colspan="9"><div class="empty">loading…</div></td></tr></tbody>
+      <tbody id="body"><tr><td colspan="10"><div class="empty">loading…</div></td></tr></tbody>
     </table>
   </div>
 </div>
@@ -194,6 +209,7 @@ const tq = token ? ('?token=' + encodeURIComponent(token)) : '';
 function url(path, extra){ let u = path + tq; if(extra) u += (tq?'&':'?') + extra; return u; }
 
 let filter = 'all';
+let sourceFilter = 'all';
 let search = '';
 let sortKey = 'last_seen';
 let sortDir = -1;
@@ -290,6 +306,20 @@ function applyManualModeUI(isManual){
   intervalInput.style.opacity = isManual ? '0.4' : '1';
 }
 
+function applyRetailerUI(c){
+  const jb = document.getElementById('jbToggle');
+  const bw = document.getElementById('bwToggle');
+  if(c.jbhifi_ready === false){
+    jb.textContent = 'JB HI-FI: NO CREDS'; jb.className = 'btn ghost'; jb.disabled = true;
+  }else{
+    jb.disabled = false;
+    jb.textContent = 'JB HI-FI: ' + (c.jbhifi_on ? 'ON' : 'OFF');
+    jb.className = c.jbhifi_on ? 'btn manual' : 'btn ghost';
+  }
+  bw.textContent = 'BIG W: ' + (c.bigw_on ? 'ON' : 'OFF');
+  bw.className = c.bigw_on ? 'btn manual' : 'btn ghost';
+}
+
 async function loadConfig(){
   try{
     const c = await fetch(url('/api/config')).then(r=>r.json());
@@ -302,8 +332,20 @@ async function loadConfig(){
     document.getElementById('whHint').textContent = c.webhook_set ? ('— set ('+c.webhook_hint+')') : '— none set';
     manualMode = !!c.manual_only;
     applyManualModeUI(manualMode);
+    applyRetailerUI(c);
   }catch(e){}
 }
+
+async function setRetailer(field, on){
+  try{
+    const body = {}; body[field] = on;
+    await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    toast((field==='jbhifi_on'?'JB Hi-Fi':'BIG W')+' '+(on?'enabled':'disabled'),'ok');
+    await loadConfig(); await tick();
+  }catch(e){ toast('failed to toggle retailer','err'); }
+}
+document.getElementById('jbToggle').addEventListener('click',function(){ setRetailer('jbhifi_on', this.className.indexOf('manual')<0); });
+document.getElementById('bwToggle').addEventListener('click',function(){ setRetailer('bigw_on', this.className.indexOf('manual')<0); });
 
 document.getElementById('saveBtn').addEventListener('click',async()=>{
   const pend = document.getElementById('kwInput').value.trim().toLowerCase();
@@ -379,11 +421,11 @@ document.getElementById('clearBtn').addEventListener('click',async()=>{
 });
 
 document.getElementById('exportBtn').addEventListener('click',()=>{
-  window.open(url('/api/export.csv','filter='+filter),'_blank');
+  window.open(url('/api/export.csv','filter='+filter+'&source='+sourceFilter),'_blank');
 });
 
-async function deleteRow(sku){
-  try{ await fetch(url('/api/results/'+encodeURIComponent(sku)),{method:'DELETE'}); toast('removed '+sku,'ok'); await loadResults(); }
+async function deleteRow(id){
+  try{ await fetch(url('/api/results/'+encodeURIComponent(id)),{method:'DELETE'}); toast('removed','ok'); await loadResults(); }
   catch(e){ toast('delete failed','err'); }
 }
 
@@ -395,9 +437,15 @@ document.getElementById('headRow').querySelectorAll('th[data-k]').forEach(th=>th
   renderRows();
 }));
 
-document.querySelectorAll('.fb').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('.fb').forEach(x=>x.classList.remove('active'));
+// status filters (All / Hidden / Coming) — scoped so they don't touch store filters
+document.querySelectorAll('.filters:not(#srcFilters) .fb').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.filters:not(#srcFilters) .fb').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); filter=b.dataset.f; loadResults();
+}));
+// store filters (All stores / JB Hi-Fi / BIG W)
+document.querySelectorAll('#srcFilters .fb').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('#srcFilters .fb').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); sourceFilter=b.dataset.s; loadResults();
 }));
 
 // ── data ───────────────────────────────────────────────────────────────────
@@ -424,7 +472,8 @@ async function loadStatus(){
       pauseBtn.textContent='PAUSE'; pauseBtn.dataset.paused='0';
       document.getElementById('dot').className='dot live';
       const modeStr = manualMode ? 'manual mode' : 'every '+(s.interval>=60?Math.round(s.interval/60)+'min':s.interval+'s');
-      document.getElementById('status').textContent='live · '+(s.keywords||[]).join(', ')+' · '+modeStr;
+      const srcStr = (s.sources||[]).map(x=>x==='bigw'?'BIG W':'JB Hi-Fi').join(' + ') || 'no stores';
+      document.getElementById('status').textContent='live · '+srcStr+' · '+(s.keywords||[]).join(', ')+' · '+modeStr;
     }
   }catch(e){
     document.getElementById('dot').className='dot err';
@@ -445,13 +494,13 @@ function tickCountdown(){
 
 async function loadResults(){
   try{
-    const rows = await fetch(url('/api/results','filter='+filter)).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
+    const rows = await fetch(url('/api/results','filter='+filter+'&source='+sourceFilter)).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
     rowsCache = rows;
     document.getElementById('sTotal').textContent = rows.length;
     document.getElementById('sHidden').textContent = rows.filter(x=>x.is_hidden).length;
     renderRows();
   }catch(e){
-    document.getElementById('body').innerHTML='<tr><td colspan="9"><div class="empty">failed to load: '+e.message+'</div></td></tr>';
+    document.getElementById('body').innerHTML='<tr><td colspan="10"><div class="empty">failed to load: '+e.message+'</div></td></tr>';
   }
 }
 
@@ -472,14 +521,19 @@ function renderRows(){
     th.innerHTML = base + (th.dataset.k===sortKey ? ' <span class="arr">'+(sortDir>0?'▲':'▼')+'</span>' : '');
   });
   if(!rows.length){
-    document.getElementById('body').innerHTML='<tr><td colspan="9"><div class="empty">'+(search?'no matches':'no results yet')+'</div></td></tr>';
+    document.getElementById('body').innerHTML='<tr><td colspan="10"><div class="empty">'+(search?'no matches':'no results yet')+'</div></td></tr>';
     return;
   }
   document.getElementById('body').innerHTML = rows.map(r=>{
-    const link = r.handle ? '<a href="https://www.jbhifi.com.au/products/'+r.handle+'" target="_blank" rel="noopener">'+esc(r.title)+'</a>' : esc(r.title);
+    const href = r.url || (r.handle ? 'https://www.jbhifi.com.au/products/'+r.handle : '');
+    const link = href ? '<a href="'+esc(href)+'" target="_blank" rel="noopener">'+esc(r.title)+'</a>' : esc(r.title);
+    const store = r.source==='bigw'
+      ? '<span class="store st-bw">BIG W</span>'
+      : '<span class="store st-jb">JB HI-FI</span>';
     const kws = (r.matched||[]).map(k=>'<span class="kw">'+esc(k)+'</span>').join('');
     const reasons = (r.reasons||[]).length ? '<div class="reasons">'+r.reasons.map(x=>'<span class="rtag">'+esc(x)+'</span>').join('')+'</div>' : '';
     return '<tr>'
+      +'<td>'+store+'</td>'
       +'<td class="sku">'+esc(r.sku)+'</td>'
       +'<td class="ttl">'+link+reasons+'</td>'
       +'<td class="price">'+(r.price?'$'+r.price:'—')+'</td>'
@@ -488,10 +542,10 @@ function renderRows(){
       +'<td class="mono" style="color:'+(r.limit_per?'var(--accent2)':'var(--muted)')+'">'+(r.limit_per||'—')+'</td>'
       +'<td>'+kws+'</td>'
       +'<td class="mono">'+aest(r.first_seen)+'</td>'
-      +'<td><span class="del" data-sku="'+esc(r.sku)+'">×</span></td>'
+      +'<td><span class="del" data-id="'+esc(r.id)+'">×</span></td>'
       +'</tr>';
   }).join('');
-  document.querySelectorAll('.del').forEach(d=>d.addEventListener('click',()=>deleteRow(d.dataset.sku)));
+  document.querySelectorAll('.del').forEach(d=>d.addEventListener('click',()=>deleteRow(d.dataset.id)));
 }
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }

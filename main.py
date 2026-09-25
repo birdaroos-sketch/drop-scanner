@@ -57,6 +57,21 @@ DB_PATH = DB_DIR / "scanner.db"
 ATTRS = ("sku,title,price,published_at,release_date,isPublic,availability,product,tags,handle,"
          "image,images,product_image,featured_image,image_url,imageUrl,thumbnail,media")
 
+# ── BIG W search API (first-party, not Algolia) ──────────────────────────────
+BIGW_SEARCH_URL = "https://api.bigw.com.au/search/v1/search"
+BIGW_BASE       = "https://www.bigw.com.au"
+BIGW_UA         = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+BIGW_ATTRS      = [
+    "identifiers",
+    "information.name", "information.brand", "information.media.image",
+    "attributes.listingStatus", "attributes.maxQuantity", "attributes.condition",
+    "prices.NAT", "fulfilment.preorder", "fulfilment.delivery",
+    "fulfilment.collection", "fulfilment.logisticType",
+]
+# listingStatus values that mean "normally purchasable" (anything else => hidden)
+BIGW_LISTED_OK  = {"LISTEDONLINEANDSTORE", "LISTEDONLINEONLY", "LISTEDINSTOREONLY"}
+
 def _norm(s: str) -> str:
     """Strip accents and replace & with 'and' so keyword matching is accent/symbol-agnostic."""
     s = unicodedata.normalize("NFKD", str(s))
@@ -72,6 +87,13 @@ MAX_RESULTS_CAP = 1000
 
 # ── runtime config (editable from the dashboard, persisted in DB) ────────────
 
+def _envbool(name: str, default: bool) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    if v in ("1", "true", "yes"):  return True
+    if v in ("0", "false", "no"):  return False
+    return default
+
+
 def _env_defaults() -> dict:
     return {
         "keywords":     [k.strip().lower() for k in os.environ.get("KEYWORDS", "").split(",") if k.strip()],
@@ -80,7 +102,9 @@ def _env_defaults() -> dict:
         "max_results":  int(os.environ.get("MAX_RESULTS", "200")),
         "webhook":      os.environ.get("DISCORD_WEBHOOK", "").strip(),
         "paused":       False,
-        "manual_only":  os.environ.get("MANUAL_ONLY", "").strip().lower() in ("1", "true", "yes"),
+        "manual_only":  _envbool("MANUAL_ONLY", False),
+        "jbhifi_on":    _envbool("JBHIFI_ON", True),
+        "bigw_on":      _envbool("BIGW_ON", True),
     }
 
 config: dict = _env_defaults()
@@ -93,6 +117,8 @@ def clamp_config(c: dict) -> dict:
     c["neg_keywords"] = [_norm(k).strip().lower() for k in c.get("neg_keywords", []) if k.strip()]
     c["paused"]       = bool(c.get("paused", False))
     c["manual_only"]  = bool(c.get("manual_only", False))
+    c["jbhifi_on"]    = bool(c.get("jbhifi_on", True))
+    c["bigw_on"]      = bool(c.get("bigw_on", True))
     c["webhook"]      = (c.get("webhook") or "").strip()
     return c
 
@@ -109,7 +135,7 @@ def load_config() -> None:
             saved = json.loads(raw)
             config.update({k: saved[k] for k in (
                 "keywords", "neg_keywords", "interval", "max_results",
-                "webhook", "paused", "manual_only",
+                "webhook", "paused", "manual_only", "jbhifi_on", "bigw_on",
             ) if k in saved})
         except Exception as e:
             print(f"[config] failed to load saved config: {e}", flush=True)
@@ -124,31 +150,55 @@ def db_conn() -> sqlite3.Connection:
     return conn
 
 
+def _create_products(c: sqlite3.Connection) -> None:
+    c.execute("""
+        CREATE TABLE products (
+            id            TEXT PRIMARY KEY,   -- "<source>:<sku>"
+            source        TEXT,               -- "jbhifi" | "bigw"
+            sku           TEXT,
+            title         TEXT,
+            price         REAL,
+            status        TEXT,
+            release_date  TEXT,
+            limit_per     INTEGER,
+            is_hidden     INTEGER,
+            is_coming     INTEGER,
+            reasons       TEXT,
+            matched       TEXT,
+            handle        TEXT,
+            first_seen    TEXT,
+            last_seen     TEXT,
+            last_status   TEXT
+        )
+    """)
+
+
 def init_db() -> None:
     with db_conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS products (
-                sku           TEXT PRIMARY KEY,
-                title         TEXT,
-                price         REAL,
-                status        TEXT,
-                release_date  TEXT,
-                limit_per     INTEGER,
-                is_hidden     INTEGER,
-                is_coming     INTEGER,
-                reasons       TEXT,
-                matched       TEXT,
-                handle        TEXT,
-                first_seen    TEXT,
-                last_seen     TEXT,
-                last_status   TEXT
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY, value TEXT
-            )
-        """)
+        c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        exists = c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='products'"
+        ).fetchone()
+        if not exists:
+            _create_products(c)
+            return
+        cols = [r[1] for r in c.execute("PRAGMA table_info(products)")]
+        if "id" not in cols:
+            # migrate old jbhifi-only table (sku PRIMARY KEY, no source) → new schema
+            c.execute("ALTER TABLE products RENAME TO products_old")
+            _create_products(c)
+            c.execute("""
+                INSERT OR IGNORE INTO products
+                    (id, source, sku, title, price, status, release_date, limit_per,
+                     is_hidden, is_coming, reasons, matched, handle,
+                     first_seen, last_seen, last_status)
+                SELECT 'jbhifi:'||sku, 'jbhifi', sku, title, price, status, release_date,
+                       limit_per, is_hidden, is_coming, reasons, matched, handle,
+                       first_seen, last_seen, last_status
+                FROM products_old
+            """)
+            c.execute("DROP TABLE products_old")
+            print("[db] migrated products table to multi-source schema", flush=True)
 
 
 def set_meta(key: str, value: str) -> None:
@@ -209,14 +259,29 @@ def pick_image(hit: dict) -> str:
     return ""
 
 
+def match_keywords(title: str) -> tuple[list, list, bool]:
+    """Apply the shared keyword GROUP filter (OR across chips, AND within a chip)
+    to a product title. Returns (matched_groups, neg_groups, kw_ok)."""
+    kw_text = _norm(str(title or "")).lower()
+
+    def _group_matches(group: str) -> bool:
+        terms = group.split()
+        return bool(terms) and all(t in kw_text for t in terms)
+
+    keywords     = config["keywords"]
+    neg_keywords = config.get("neg_keywords", [])
+    matched      = [g for g in keywords if _group_matches(g)]
+    neg_matched  = [g for g in neg_keywords if _group_matches(g)]
+    kw_ok        = (not keywords) or bool(matched)   # empty list => match all
+    return matched, neg_matched, kw_ok
+
+
 def classify(hit: dict) -> dict:
-    """Turn a raw Algolia hit into a normalized product record with hidden flags."""
+    """Turn a raw Algolia (JB Hi-Fi) hit into a normalized product record."""
     avail    = hit.get("availability") or {}
     flags    = [f.get("Name", "") for f in (hit.get("product") or {}).get("productFlags", [])]
     overall  = avail.get("overallStatus", "") or ""
     now_ts   = datetime.now(timezone.utc).timestamp()
-    keywords     = config["keywords"]
-    neg_keywords = config.get("neg_keywords", [])
 
     reasons = []
     if hit.get("isPublic") is False:            reasons.append("isPublic=false")
@@ -232,26 +297,10 @@ def classify(hit: dict) -> dict:
     if is_coming:
         reasons.append(f"release:{rd_str}")
 
-    search_text = _norm(" ".join([
-        str(hit.get("title", "")), str(hit.get("sku", "")),
-        overall, str(hit.get("tags", "")), json.dumps(reasons),
-    ])).lower()
-
-    # Keyword GROUPS match against the title only. One chip = one group whose
-    # space-separated terms must ALL appear in the title (AND within a group).
-    # A product qualifies if ANY group matches (OR across groups).
-    kw_text = _norm(str(hit.get("title", ""))).lower()
-
-    def _group_matches(group: str) -> bool:
-        terms = group.split()
-        return bool(terms) and all(t in kw_text for t in terms)
-
-    matched     = [g for g in keywords if _group_matches(g)]
-    neg_matched = [g for g in neg_keywords if _group_matches(g)]
-    # empty keyword list => all products qualify
-    kw_ok       = (not keywords) or bool(matched)
+    matched, neg_matched, kw_ok = match_keywords(hit.get("title", ""))
 
     return {
+        "source":       "jbhifi",
         "sku":          str(hit.get("sku") or hit.get("objectID") or "—"),
         "title":        hit.get("title") or "—",
         "price":        hit.get("price"),
@@ -264,8 +313,94 @@ def classify(hit: dict) -> dict:
         "matched":      json.dumps(matched),
         "neg_matched":  json.dumps(neg_matched),
         "kw_ok":        kw_ok,
-        "handle":       hit.get("handle") or "",
+        "handle":       hit.get("handle") or "",   # bare slug; URL built as jbhifi
         "image":        pick_image(hit),
+    }
+
+
+# ── BIG W fetch + classify ───────────────────────────────────────────────────
+
+async def fetch_bigw(client: httpx.AsyncClient, query: str) -> list[dict]:
+    if not query:
+        return []
+    payload = {
+        "format": "1", "clientId": "web", "sessionId": "drop-scanner",
+        "page": 0, "perPage": min(config["max_results"], 100),
+        "sort": "relevance", "text": query,
+        "filter": {"inStock": False},   # include out-of-stock so we can catch restocks
+        "include": {
+            "facets": False, "additionalFacets": [], "suggestions": False,
+            "productAttributes": BIGW_ATTRS,
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": BIGW_BASE, "Referer": BIGW_BASE + "/", "User-Agent": BIGW_UA,
+    }
+    r = await client.post(BIGW_SEARCH_URL, json=payload, headers=headers, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    return ((data.get("organic") or {}).get("results")) or []
+
+
+def _bigw_slug(name: str) -> str:
+    s = _norm(name).lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "product"
+
+
+def classify_bigw(hit: dict) -> dict:
+    """Normalize a BIG W search result into the same record shape as classify()."""
+    info   = hit.get("information") or {}
+    attrs  = hit.get("attributes") or {}
+    ful    = hit.get("fulfilment") or {}
+    ident  = hit.get("identifiers") or {}
+    name   = info.get("name") or "—"
+    sku    = str(ident.get("articleId") or ident.get("mpn") or "—")
+
+    cents  = (((hit.get("prices") or {}).get("NAT") or {}).get("price") or {}).get("cents")
+    price  = round(cents / 100, 2) if isinstance(cents, (int, float)) else None
+
+    in_stock = bool(hit.get("stock"))
+    listing  = attrs.get("listingStatus") or ""
+    preorder = bool(ful.get("preorder"))
+
+    reasons = []
+    if preorder:                         reasons.append("Preorder")
+    if not in_stock:                     reasons.append("OutOfStock")
+    if listing == "LISTEDONLINEONLY":    reasons.append("OnlineOnly")
+    if listing and listing not in BIGW_LISTED_OK: reasons.append(listing)
+
+    if preorder:     status = "PreOrder"
+    elif in_stock:   status = "InStock"
+    else:            status = "OutOfStock"
+
+    media = (info.get("media") or {}).get("image") or {}
+    img   = media.get("medium") or media.get("large") or media.get("small") or ""
+    image = (BIGW_BASE + img) if img.startswith("/") else img
+    url   = f"{BIGW_BASE}/product/{_bigw_slug(name)}/p/{sku}"
+
+    matched, neg_matched, kw_ok = match_keywords(name)
+    # "hidden" for BIG W = not normally purchasable right now (out of stock,
+    # preorder, or an unusual listing status the user is waiting on).
+    is_hidden = 1 if (preorder or not in_stock or (listing and listing not in BIGW_LISTED_OK)) else 0
+
+    return {
+        "source":       "bigw",
+        "sku":          sku,
+        "title":        name,
+        "price":        price,
+        "status":       status,
+        "release_date": "",
+        "limit_per":    attrs.get("maxQuantity"),
+        "is_hidden":    is_hidden,
+        "is_coming":    1 if preorder else 0,
+        "reasons":      json.dumps(reasons),
+        "matched":      json.dumps(matched),
+        "neg_matched":  json.dumps(neg_matched),
+        "kw_ok":        kw_ok,
+        "handle":       url,          # full URL; build_embed detects http:// and uses as-is
+        "image":        image,
     }
 
 
@@ -278,6 +413,7 @@ COLOR_CHANGE = 0xF5C518   # amber — other status change
 _STATUS_LABELS = {
     "InStock": "In Stock", "NoLongerAvailable": "No Longer Available",
     "ComingSoon": "Coming Soon", "PreOrder": "Pre-Order", "Available": "Available",
+    "OutOfStock": "Out of Stock",
 }
 
 
@@ -307,10 +443,24 @@ def aest_now_str() -> str:
         return datetime.now(timezone.utc).strftime("%H:%M:%S") + " UTC"
 
 
+def retailer_name(rec: dict) -> str:
+    return "BIG W" if rec.get("source") == "bigw" else "JB Hi-Fi"
+
+
+def product_url(rec: dict):
+    handle = rec.get("handle") or ""
+    if not handle:
+        return None
+    if handle.startswith("http"):        # BIG W stores a full URL
+        return handle
+    return f"https://www.jbhifi.com.au/products/{handle}"
+
+
 def build_embed(rec: dict, color: int, footer_time: str) -> dict:
-    url = f"https://www.jbhifi.com.au/products/{rec['handle']}" if rec.get("handle") else None
+    retailer = retailer_name(rec)
+    url = product_url(rec)
     embed = {
-        "author": {"name": "JB Hi-Fi"},
+        "author": {"name": retailer},
         "title": (rec.get("title") or "—")[:250],
         "color": color,
         "fields": [
@@ -318,14 +468,14 @@ def build_embed(rec: dict, color: int, footer_time: str) -> dict:
             {"name": "👁️ Visibility", "value": "🙈 HIDDEN" if rec.get("is_hidden") else "👀 Visible", "inline": True},
             {"name": "💰 Price",      "value": (f"${rec['price']}" if rec.get("price") else "—"), "inline": True},
             {"name": "🏷️ SKU",        "value": f"`{rec.get('sku', '—')}`", "inline": True},
-            {"name": "📅 Release",    "value": (rec.get("release_date") or "—"), "inline": True},
+            {"name": "🏬 Retailer",   "value": retailer, "inline": True},
             {"name": "🔢 Limit",      "value": (str(rec["limit_per"]) if rec.get("limit_per") else "—"), "inline": True},
         ],
-        "footer": {"text": f"Drop Scanner · JB Hi-Fi watch [{footer_time}]"},
+        "footer": {"text": f"Drop Scanner · {retailer} watch [{footer_time}]"},
     }
     if url:
         embed["url"] = url
-        embed["description"] = f"🛒 [Open on JB Hi-Fi]({url})"
+        embed["description"] = f"🛒 [Open on {retailer}]({url})"
     if rec.get("image"):
         embed["thumbnail"] = {"url": rec["image"]}
     return embed
@@ -368,46 +518,65 @@ scan_state = {
 scan_now_event = asyncio.Event()
 
 
+def active_sources() -> list[str]:
+    srcs = []
+    if config.get("jbhifi_on", True) and ALGOLIA_APP_ID and ALGOLIA_API_KEY:
+        srcs.append("jbhifi")
+    if config.get("bigw_on", True):
+        srcs.append("bigw")
+    return srcs
+
+
 async def run_one_scan(client: httpx.AsyncClient) -> None:
     keywords = config["keywords"]
     # Query each unique term across all groups for broad recall; the group
-    # AND/OR filter in classify() then narrows to real matches.
+    # AND/OR filter (via kw_ok) then narrows to real matches.
     terms   = sorted({t for g in keywords for t in g.split()})
     queries = terms if terms else [""]
-    merged: dict[str, dict] = {}
+    sources = active_sources()
+    merged: dict[str, dict] = {}   # keyed by id = "<source>:<sku>"
+    errors: list[str] = []
+
+    def keep(rec: dict) -> bool:
+        return rec["kw_ok"] and not json.loads(rec["neg_matched"])
 
     for q in queries:
-        try:
-            hits = await fetch_algolia(client, q)
-        except Exception as e:
-            scan_state["last_error"] = f"{type(e).__name__}: {e}"
-            print(f"[scan] fetch error for '{q}': {e}", flush=True)
-            raise
-        for h in hits:
-            rec = classify(h)
-            if not rec["kw_ok"]:
-                continue  # title is missing one or more required keywords (AND)
-            if json.loads(rec.get("neg_matched", "[]")):
-                continue  # title contains an excluded keyword
-            merged[rec["sku"]] = rec
+        if "jbhifi" in sources:
+            try:
+                for h in await fetch_algolia(client, q):
+                    rec = classify(h)
+                    if keep(rec):
+                        merged[f"jbhifi:{rec['sku']}"] = rec
+            except Exception as e:
+                msg = f"jbhifi '{q}': {type(e).__name__}: {e}"
+                errors.append(msg); print(f"[scan] {msg}", flush=True)
+        if "bigw" in sources:
+            try:
+                for h in await fetch_bigw(client, q):
+                    rec = classify_bigw(h)
+                    if keep(rec):
+                        merged[f"bigw:{rec['sku']}"] = rec
+            except Exception as e:
+                msg = f"bigw '{q}': {type(e).__name__}: {e}"
+                errors.append(msg); print(f"[scan] {msg}", flush=True)
 
     now = datetime.now(timezone.utc).isoformat()
     new_hidden: list[dict] = []
     status_changes: list[tuple[dict, str]] = []
 
     with db_conn() as c:
-        for sku, rec in merged.items():
-            existing = c.execute("SELECT sku,last_status FROM products WHERE sku=?", (sku,)).fetchone()
+        for pid, rec in merged.items():
+            existing = c.execute("SELECT last_status FROM products WHERE id=?", (pid,)).fetchone()
             if existing is None:
                 c.execute("""
                     INSERT INTO products
-                    (sku,title,price,status,release_date,limit_per,is_hidden,is_coming,
+                    (id,source,sku,title,price,status,release_date,limit_per,is_hidden,is_coming,
                      reasons,matched,handle,first_seen,last_seen,last_status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
-                    rec["sku"], rec["title"], rec["price"], rec["status"], rec["release_date"],
-                    rec["limit_per"], rec["is_hidden"], rec["is_coming"], rec["reasons"],
-                    rec["matched"], rec["handle"], now, now, rec["status"],
+                    pid, rec["source"], rec["sku"], rec["title"], rec["price"], rec["status"],
+                    rec["release_date"], rec["limit_per"], rec["is_hidden"], rec["is_coming"],
+                    rec["reasons"], rec["matched"], rec["handle"], now, now, rec["status"],
                 ))
                 if rec["is_hidden"]:
                     new_hidden.append(rec)
@@ -419,11 +588,11 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                     UPDATE products SET
                       title=?,price=?,status=?,release_date=?,limit_per=?,is_hidden=?,
                       is_coming=?,reasons=?,matched=?,handle=?,last_seen=?,last_status=?
-                    WHERE sku=?
+                    WHERE id=?
                 """, (
                     rec["title"], rec["price"], rec["status"], rec["release_date"], rec["limit_per"],
                     rec["is_hidden"], rec["is_coming"], rec["reasons"], rec["matched"],
-                    rec["handle"], now, rec["status"], rec["sku"],
+                    rec["handle"], now, rec["status"], pid,
                 ))
 
     footer_time = aest_now_str()
@@ -453,20 +622,22 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
         await asyncio.sleep(0.35)
 
     if not new_hidden and not status_changes:
-        kw_str = ", ".join(config["keywords"]) if config["keywords"] else "all"
+        kw_str  = ", ".join(config["keywords"]) if config["keywords"] else "all"
+        src_str = "+".join(s.upper() for s in sources) if sources else "none"
         await discord_post(
             client,
-            f"🔍 **Scan #{scan_state['scans'] + 1} — nothing new** · {len(merged)} products checked · keywords: {kw_str} · [{footer_time} AEST]",
+            f"🔍 **Scan #{scan_state['scans'] + 1} — nothing new** · {len(merged)} products checked "
+            f"· retailers: {src_str} · keywords: {kw_str} · [{footer_time} AEST]",
             [],
         )
 
     scan_state["scans"] += 1
     scan_state["last_scan"] = now
-    scan_state["last_error"] = None
+    scan_state["last_error"] = "; ".join(errors) if errors else None
     scan_state["total_products"] = len(merged)
     set_meta("last_scan", now)
     set_meta("scan_count", str(scan_state["scans"]))
-    print(f"[scan] #{scan_state['scans']} — {len(merged)} matched, "
+    print(f"[scan] #{scan_state['scans']} — {len(merged)} matched across {sources}, "
           f"{len(new_hidden)} new hidden, {len(status_changes)} status changes", flush=True)
 
 
@@ -511,12 +682,13 @@ async def lifespan(app: FastAPI):
     init_db()
     load_config()
     scan_state["scans"] = int(get_meta("scan_count", "0") or "0")
-    if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
-        print("[boot] WARNING: ALGOLIA_APP_ID / ALGOLIA_API_KEY not set — scan loop idle", flush=True)
+    jbhifi_ok = bool(ALGOLIA_APP_ID and ALGOLIA_API_KEY)
+    if not jbhifi_ok and not config.get("bigw_on", True):
+        print("[boot] WARNING: no source available (JB Hi-Fi creds missing, BIG W off) — scan loop idle", flush=True)
         yield
         return
     task = asyncio.create_task(scan_loop())
-    print(f"[boot] scan loop started — every {config['interval']}s, "
+    print(f"[boot] scan loop started — every {config['interval']}s, sources={active_sources()}, "
           f"keywords={config['keywords']}, neg_keywords={config['neg_keywords']}, "
           f"paused={config['paused']}, manual_only={config['manual_only']}", flush=True)
     yield
@@ -543,6 +715,9 @@ def public_config() -> dict:
         "max_results":  config["max_results"],
         "paused":       config["paused"],
         "manual_only":  config["manual_only"],
+        "jbhifi_on":    config["jbhifi_on"],
+        "bigw_on":      config["bigw_on"],
+        "jbhifi_ready": bool(ALGOLIA_APP_ID and ALGOLIA_API_KEY),
         "webhook_set":  bool(wh),
         "webhook_hint": ("…" + wh[-6:]) if wh else "",
     }
@@ -564,6 +739,9 @@ async def api_status(request: Request):
         "max_results":    config["max_results"],
         "keywords":       config["keywords"],
         "neg_keywords":   config["neg_keywords"],
+        "jbhifi_on":      config["jbhifi_on"],
+        "bigw_on":        config["bigw_on"],
+        "sources":        active_sources(),
         "index":          ALGOLIA_INDEX,
     }
 
@@ -606,6 +784,10 @@ async def api_set_config(request: Request):
         config["manual_only"] = bool(body["manual_only"])
         if config["manual_only"]:
             scan_state["next_scan"] = None
+    if "jbhifi_on" in body:
+        config["jbhifi_on"] = bool(body["jbhifi_on"])
+    if "bigw_on" in body:
+        config["bigw_on"] = bool(body["bigw_on"])
 
     clamp_config(config)
     save_config()
@@ -631,8 +813,8 @@ async def api_control(request: Request):
             scan_now_event.set()
         return {"ok": True, "paused": False}
     if action in ("scan", "scan_now"):
-        if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
-            raise HTTPException(status_code=400, detail="Algolia creds not configured")
+        if not active_sources():
+            raise HTTPException(status_code=400, detail="no retailer enabled (turn on JB Hi-Fi or BIG W)")
         scan_now_event.set()
         return {"ok": True, "scans": scan_state["scans"]}
     raise HTTPException(status_code=400, detail="action must be pause | resume | scan")
@@ -641,8 +823,8 @@ async def api_control(request: Request):
 @app.post("/api/scan-now")
 async def api_scan_now(request: Request):
     check_token(request)
-    if not ALGOLIA_APP_ID or not ALGOLIA_API_KEY:
-        raise HTTPException(status_code=400, detail="Algolia creds not configured")
+    if not active_sources():
+        raise HTTPException(status_code=400, detail="no retailer enabled (turn on JB Hi-Fi or BIG W)")
     scan_now_event.set()
     return {"ok": True, "scans": scan_state["scans"]}
 
@@ -662,26 +844,36 @@ async def api_test_discord(request: Request):
     return {"ok": True}
 
 
+def _results_where(filter: str, source: str) -> tuple[str, list]:
+    clauses, params = [], []
+    if filter == "hidden":   clauses.append("is_hidden=1")
+    elif filter == "coming": clauses.append("is_coming=1")
+    if source in ("jbhifi", "bigw"):
+        clauses.append("source=?"); params.append(source)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
 @app.get("/api/results")
-async def api_results(request: Request, filter: str = Query("all")):
+async def api_results(request: Request, filter: str = Query("all"), source: str = Query("all")):
     check_token(request)
-    where = ""
-    if filter == "hidden":  where = "WHERE is_hidden=1"
-    elif filter == "coming": where = "WHERE is_coming=1"
+    where, params = _results_where(filter, source)
     with db_conn() as c:
         rows = c.execute(
-            f"SELECT * FROM products {where} ORDER BY last_seen DESC, release_date ASC"
+            f"SELECT * FROM products {where} ORDER BY last_seen DESC, release_date ASC", params
         ).fetchall()
     out = []
     for r in rows:
         out.append({
+            "id": r["id"], "source": r["source"],
             "sku": r["sku"], "title": r["title"], "price": r["price"],
             "status": r["status"], "release_date": r["release_date"],
             "limit_per": r["limit_per"], "is_hidden": bool(r["is_hidden"]),
             "is_coming": bool(r["is_coming"]),
             "reasons": json.loads(r["reasons"] or "[]"),
             "matched": json.loads(r["matched"] or "[]"),
-            "handle": r["handle"], "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+            "handle": r["handle"], "url": product_url(dict(r)),
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"],
         })
     return JSONResponse(out)
 
@@ -695,35 +887,34 @@ async def api_clear_results(request: Request):
     return {"ok": True, "cleared": True}
 
 
-@app.delete("/api/results/{sku}")
-async def api_delete_result(request: Request, sku: str):
+@app.delete("/api/results/{pid:path}")
+async def api_delete_result(request: Request, pid: str):
     check_token(request)
     with db_conn() as c:
-        cur = c.execute("DELETE FROM products WHERE sku=?", (sku,))
+        # pid is the composite id "<source>:<sku>"; fall back to bare sku for old links
+        cur = c.execute("DELETE FROM products WHERE id=? OR sku=?", (pid, pid))
         deleted = cur.rowcount
     return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/export.csv")
-async def api_export_csv(request: Request, filter: str = Query("all")):
+async def api_export_csv(request: Request, filter: str = Query("all"), source: str = Query("all")):
     check_token(request)
-    where = ""
-    if filter == "hidden":  where = "WHERE is_hidden=1"
-    elif filter == "coming": where = "WHERE is_coming=1"
+    where, params = _results_where(filter, source)
     with db_conn() as c:
-        rows = c.execute(f"SELECT * FROM products {where} ORDER BY last_seen DESC").fetchall()
+        rows = c.execute(f"SELECT * FROM products {where} ORDER BY last_seen DESC", params).fetchall()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["sku", "title", "price", "status", "release_date", "limit_per",
-                "is_hidden", "is_coming", "reasons", "matched", "handle",
+    w.writerow(["source", "sku", "title", "price", "status", "release_date", "limit_per",
+                "is_hidden", "is_coming", "reasons", "matched", "url",
                 "first_seen", "last_seen"])
     for r in rows:
         w.writerow([
-            r["sku"], r["title"], r["price"], r["status"], r["release_date"], r["limit_per"],
+            r["source"], r["sku"], r["title"], r["price"], r["status"], r["release_date"], r["limit_per"],
             r["is_hidden"], r["is_coming"],
             " | ".join(json.loads(r["reasons"] or "[]")),
             " | ".join(json.loads(r["matched"] or "[]")),
-            r["handle"], r["first_seen"], r["last_seen"],
+            product_url(dict(r)) or "", r["first_seen"], r["last_seen"],
         ])
     return PlainTextResponse(buf.getvalue(), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=drop-scanner.csv"})
