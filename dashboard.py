@@ -3,559 +3,664 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0d10">
 <title>Drop Scanner</title>
 <style>
-  :root{--bg:#0a0a0a;--surface:#111;--surface2:#1a1a1a;--border:#222;--accent:#f5c518;--accent2:#ff4444;--green:#22c55e;--blue:#3b82f6;--text:#e8e8e8;--muted:#555;--muted2:#888;--radius:6px;--font:'SF Mono','Fira Code',ui-monospace,monospace;--sans:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;min-height:100vh}
-  .header{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;flex-wrap:wrap}
-  .logo{font-family:var(--font);font-size:13px;font-weight:700;color:var(--accent);letter-spacing:.05em}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
-  .dot.live{background:var(--green);animation:pulse 2s infinite}
-  .dot.paused{background:var(--accent)}
-  .dot.err{background:var(--accent2)}
-  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.4)}70%{box-shadow:0 0 0 6px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
-  .status{font-family:var(--font);font-size:11px;color:var(--muted2);flex:1;min-width:140px}
-  .actions{display:flex;gap:6px;flex-wrap:wrap}
-  .btn{background:var(--accent);color:#000;border:none;border-radius:var(--radius);font-family:var(--font);font-size:11px;font-weight:700;padding:7px 12px;cursor:pointer;white-space:nowrap}
-  .btn:hover{filter:brightness(1.08)}
-  .btn.ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
-  .btn.ghost:hover{border-color:var(--muted2)}
-  .btn.manual{background:rgba(245,197,24,.15);color:var(--accent);border:1px solid rgba(245,197,24,.4)}
-  .btn.manual:hover{background:rgba(245,197,24,.25)}
-  .btn.danger{background:transparent;color:var(--accent2);border:1px solid rgba(255,68,68,.35)}
-  .btn.danger:hover{background:rgba(255,68,68,.1)}
-  .btn:disabled{opacity:.4;cursor:not-allowed}
-  .wrap{padding:20px;display:flex;flex-direction:column;gap:16px;max-width:1400px;margin:0 auto}
-  .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
-  @media(max-width:800px){.stats{grid-template-columns:repeat(3,1fr)}}
-  @media(max-width:480px){.stats{grid-template-columns:repeat(2,1fr)}}
-  .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
-  .sv{font-family:var(--font);font-size:19px;font-weight:700;line-height:1}
-  .sv.accent{color:var(--accent)}.sv.green{color:var(--green)}.sv.red{color:var(--accent2)}.sv.blue{color:var(--blue)}
-  .sl{font-family:var(--font);font-size:10px;color:var(--muted2);margin-top:5px;letter-spacing:.06em;text-transform:uppercase}
-  .panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-  .panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;user-select:none}
-  .panel-head:hover{background:var(--surface2)}
-  .panel-title{font-family:var(--font);font-size:11px;color:var(--accent);letter-spacing:.08em;text-transform:uppercase}
-  .chev{font-family:var(--font);color:var(--muted2);transition:transform .15s}
-  .panel.open .chev{transform:rotate(90deg)}
-  .panel-body{display:none;padding:0 16px 16px;border-top:1px solid var(--border)}
-  .panel.open .panel-body{display:block}
-  .field{margin-top:14px}
-  .field label{display:block;font-family:var(--font);font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
-  .field .hint{color:var(--muted);text-transform:none;letter-spacing:0}
-  input[type=text],input[type=number]{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--font);font-size:12px;padding:8px 10px}
-  input:focus{outline:none;border-color:var(--accent)}
-  .kwbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:8px}
-  .kwbox input{border:none;background:transparent;flex:1;min-width:120px;padding:2px}
-  .chip{display:inline-flex;align-items:center;gap:6px;background:rgba(245,197,24,.1);color:var(--accent);border:1px solid rgba(245,197,24,.3);border-radius:3px;font-family:var(--font);font-size:11px;padding:3px 8px}
-  .chip b{cursor:pointer;font-weight:700;opacity:.7}
-  .chip b:hover{opacity:1}
-  .nchip{display:inline-flex;align-items:center;gap:6px;background:rgba(255,68,68,.1);color:var(--accent2);border:1px solid rgba(255,68,68,.25);border-radius:3px;font-family:var(--font);font-size:11px;padding:3px 8px}
-  .nchip b{cursor:pointer;font-weight:700;opacity:.7}
-  .nchip b:hover{opacity:1}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  @media(max-width:560px){.row2{grid-template-columns:1fr}}
-  .save-row{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
-  .saved{font-family:var(--font);font-size:11px;color:var(--green);opacity:0;transition:opacity .2s}
-  .saved.show{opacity:1}
-  .bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-  .title{font-family:var(--font);font-size:11px;color:var(--muted2);letter-spacing:.08em;text-transform:uppercase}
-  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .filters{display:flex;gap:6px;flex-wrap:wrap}
-  .fb{background:var(--surface);border:1px solid var(--border);border-radius:3px;color:var(--muted2);font-family:var(--font);font-size:10px;padding:5px 10px;cursor:pointer}
-  .fb.active{background:rgba(245,197,24,.12);border-color:rgba(245,197,24,.4);color:var(--accent)}
-  .search{background:var(--surface);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--font);font-size:11px;padding:5px 10px;min-width:160px}
-  .search:focus{outline:none;border-color:var(--accent)}
-  .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
-  table{width:100%;border-collapse:collapse;font-size:12px}
-  thead{background:var(--surface2);position:sticky;top:0}
-  th{font-family:var(--font);font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.08em;padding:10px 14px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border);cursor:pointer;user-select:none}
-  th:hover{color:var(--text)}
-  th .arr{color:var(--accent)}
-  td{padding:10px 14px;border-bottom:1px solid #161616;vertical-align:middle;max-width:300px}
-  tr:hover td{background:rgba(255,255,255,.02)}
-  .sku{font-family:var(--font);font-size:11px;color:var(--accent);white-space:nowrap}
-  .ttl a{color:var(--text);text-decoration:none}.ttl a:hover{color:var(--accent)}
-  .reasons{margin-top:4px;display:flex;flex-wrap:wrap;gap:3px}
-  .rtag{font-family:var(--font);font-size:9px;color:var(--muted2);background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:2px;padding:0 4px}
-  .price{font-family:var(--font);color:var(--green);white-space:nowrap}
-  .badge{display:inline-flex;padding:2px 7px;border-radius:3px;font-family:var(--font);font-size:10px;white-space:nowrap;font-weight:600}
-  .b-hidden{background:rgba(255,68,68,.12);color:var(--accent2);border:1px solid rgba(255,68,68,.2)}
-  .b-coming{background:rgba(245,197,24,.12);color:var(--accent);border:1px solid rgba(245,197,24,.2)}
-  .b-live{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.2)}
-  .b-def{background:rgba(255,255,255,.05);color:var(--muted2);border:1px solid var(--border)}
-  .kw{background:rgba(245,197,24,.08);color:rgba(245,197,24,.7);font-family:var(--font);font-size:10px;padding:1px 5px;border-radius:2px;margin-right:3px}
-  .store{display:inline-flex;padding:2px 7px;border-radius:3px;font-family:var(--font);font-size:10px;font-weight:700;white-space:nowrap}
-  .st-jb{background:rgba(59,130,246,.14);color:var(--blue);border:1px solid rgba(59,130,246,.3)}
-  .st-bw{background:rgba(34,197,94,.14);color:var(--green);border:1px solid rgba(34,197,94,.3)}
-  .del{color:var(--muted);cursor:pointer;font-family:var(--font);font-weight:700;padding:2px 6px;border-radius:3px}
-  .del:hover{color:var(--accent2);background:rgba(255,68,68,.1)}
-  .empty{padding:60px;text-align:center;color:var(--muted);font-family:var(--font);font-size:12px}
-  .mono{font-family:var(--font);font-size:11px;color:var(--muted2);white-space:nowrap}
-  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 18px;font-family:var(--font);font-size:12px;opacity:0;pointer-events:none;transition:all .2s;z-index:200}
-  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-  .toast.ok{border-color:rgba(34,197,94,.4);color:var(--green)}
-  .toast.err{border-color:rgba(255,68,68,.4);color:var(--accent2)}
+:root{
+  --bg:#f4f5f7;--panel:#fff;--panel2:#f0f1f4;--line:#e3e5ea;--text:#15171c;--sub:#5d6371;--faint:#9aa0ac;
+  --brand:#e8a900;--brand-ink:#1a1400;--brand-soft:rgba(232,169,0,.12);
+  --ok:#16a34a;--ok-soft:rgba(22,163,74,.11);--bad:#dc2626;--bad-soft:rgba(220,38,38,.1);
+  --violet:#7c3aed;--violet-soft:rgba(124,58,237,.11);--jb:#2563eb;--jb-soft:rgba(37,99,235,.1);
+  --shadow:0 1px 2px rgba(16,18,24,.05),0 4px 16px rgba(16,18,24,.05);
+  --r:14px;--r-sm:9px;
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0c0d10;--panel:#15171c;--panel2:#1c1f26;--line:#262a33;--text:#eceef2;--sub:#9aa1ae;--faint:#626977;
+  --brand:#f5c518;--brand-soft:rgba(245,197,24,.13);
+  --ok:#22c55e;--ok-soft:rgba(34,197,94,.13);--bad:#f25555;--bad-soft:rgba(242,85,85,.13);
+  --violet:#a78bfa;--violet-soft:rgba(167,139,250,.14);--jb:#60a5fa;--jb-soft:rgba(96,165,250,.13);
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.25);
+}}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg)}
+body{color:var(--text);font:14px/1.45 var(--sans);min-height:100vh;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}
+input{font:inherit;color:inherit}
+a{color:inherit}
+.mono{font-family:var(--mono)}
+
+/* top bar */
+.top{position:sticky;top:0;z-index:40;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1320px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:12px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em;font-size:16px;white-space:nowrap}
+.logo{width:30px;height:30px;border-radius:9px;background:var(--brand);color:var(--brand-ink);display:grid;place-items:center;font-size:15px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:12.5px;color:var(--sub);white-space:nowrap;min-width:0}
+.pill b{color:var(--text);font-weight:600}
+.led{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.led.live{background:var(--ok);box-shadow:0 0 0 0 var(--ok);animation:ping 2s infinite}
+.led.paused{background:var(--brand)}.led.err{background:var(--bad)}
+.led.scan{background:var(--brand);animation:blink .7s infinite alternate}
+@keyframes ping{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 50%,transparent)}80%,100%{box-shadow:0 0 0 7px transparent}}
+@keyframes blink{to{opacity:.3}}
+.grow{flex:1}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;padding:0 14px;border-radius:10px;font-weight:600;font-size:13px;white-space:nowrap;transition:transform .08s,background .15s,border-color .15s}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.5;cursor:default;transform:none}
+.btn-primary{background:var(--brand);color:var(--brand-ink)}
+.btn-primary:hover{filter:brightness(1.05)}
+.btn-quiet{background:var(--panel);border:1px solid var(--line)}
+.btn-quiet:hover{border-color:var(--faint)}
+.btn-danger{color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 35%,transparent)}
+.btn-danger:hover{background:var(--bad-soft)}
+.icon-btn{width:36px;padding:0}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:rot .7s linear infinite}
+@keyframes rot{to{transform:rotate(1turn)}}
+
+.wrap{max-width:1320px;margin:0 auto;padding:18px 16px 60px}
+.banner{display:none;margin-bottom:14px;padding:11px 14px;border-radius:var(--r-sm);background:var(--bad-soft);color:var(--bad);font-size:13px;border:1px solid color-mix(in srgb,var(--bad) 25%,transparent)}
+.banner.show{display:block}
+.banner.info{background:var(--brand-soft);color:var(--text);border-color:color-mix(in srgb,var(--brand) 35%,transparent)}
+
+/* summary tiles (act as filters) */
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.tile{text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;box-shadow:var(--shadow);position:relative;transition:border-color .15s,transform .08s}
+.tile:hover{border-color:var(--faint)}
+.tile:active{transform:scale(.99)}
+.tile.on{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft),var(--shadow)}
+.tile .n{font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
+.tile .l{font-size:12.5px;color:var(--sub);margin-top:3px;display:flex;align-items:center;gap:6px}
+.tile .sw{width:8px;height:8px;border-radius:3px}
+@media(max-width:720px){.tiles{grid-template-columns:repeat(2,1fr)}}
+
+/* toolbar */
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.search{flex:1;min-width:200px;position:relative}
+.search input{width:100%;height:38px;border-radius:10px;border:1px solid var(--line);background:var(--panel);padding:0 12px 0 34px;font-size:14px}
+.search input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--faint)}
+.seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.seg button{height:30px;padding:0 11px;border-radius:7px;font-size:12.5px;font-weight:600;color:var(--sub);white-space:nowrap}
+.seg button.on{background:var(--panel);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+select.sel{height:38px;border-radius:10px;border:1px solid var(--line);background:var(--panel);padding:0 10px;font:inherit;font-size:13px;color:var(--text)}
+.count{font-size:12.5px;color:var(--sub);margin:-4px 0 12px}
+
+/* cards */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;position:relative;transition:border-color .15s}
+.card:hover{border-color:var(--faint)}
+.card.fresh{border-color:color-mix(in srgb,var(--violet) 55%,var(--line))}
+.thumb{aspect-ratio:4/3;background:#fff;display:grid;place-items:center;border-bottom:1px solid var(--line);position:relative}
+.thumb img{max-width:82%;max-height:82%;object-fit:contain}
+.thumb .ph{color:#b9bdc6;font-size:34px}
+.tags{position:absolute;top:10px;left:10px;right:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}
+.tag{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.01em;white-space:nowrap}
+.t-jb{background:#2563eb;color:#fff}.t-bw{background:#0f7a3a;color:#fff}
+.t-new{background:var(--violet);color:#fff;margin-left:auto}
+.body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:8px;flex:1}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;align-self:flex-start}
+.status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.s-live{color:var(--ok);background:var(--ok-soft)}
+.s-hidden{color:var(--bad);background:var(--bad-soft)}
+.s-coming{color:#b27f00;background:var(--brand-soft)}
+@media (prefers-color-scheme:dark){.s-coming{color:var(--brand)}}
+.s-other{color:var(--sub);background:var(--panel2)}
+.name{font-size:14px;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-decoration:none}
+.name:hover{text-decoration:underline;text-underline-offset:2px}
+.row{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.price{font-size:18px;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.sku{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.mini{font-size:11px;padding:2px 7px;border-radius:5px;background:var(--panel2);color:var(--sub);border:1px solid var(--line)}
+.mini.kw{background:var(--brand-soft);border-color:transparent;color:var(--text)}
+.mini.lim{background:var(--bad-soft);border-color:transparent;color:var(--bad);font-weight:600}
+.foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:10px;border-top:1px dashed var(--line);font-size:12px;color:var(--sub)}
+.foot .acts{display:flex;gap:4px}
+.ghost{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--sub)}
+.ghost:hover{background:var(--panel2);color:var(--text)}
+.ghost.rm:hover{color:var(--bad);background:var(--bad-soft)}
+
+/* list view */
+.grid.list{grid-template-columns:1fr;gap:8px}
+.grid.list .card{flex-direction:row;align-items:stretch}
+.grid.list .thumb{width:96px;aspect-ratio:auto;border-bottom:0;border-right:1px solid var(--line);flex:none}
+.grid.list .tags{top:6px;left:6px;right:auto}
+.grid.list .tags .tag{height:18px;font-size:9.5px;padding:0 5px}
+.grid.list .t-new{display:none}
+.grid.list .body{flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px 14px}
+.grid.list .name{flex:1 1 280px;-webkit-line-clamp:2}
+.grid.list .foot{margin:0;padding:0;border:0;flex:0 0 auto}
+.grid.list .price{font-size:16px}
+
+.empty{grid-column:1/-1;text-align:center;padding:64px 20px;color:var(--sub);background:var(--panel);border:1px dashed var(--line);border-radius:var(--r)}
+.empty h3{color:var(--text);font-size:16px;margin-bottom:6px}
+.empty .btn{margin-top:14px}
+.skel{height:300px;border-radius:var(--r);background:linear-gradient(90deg,var(--panel) 0%,var(--panel2) 50%,var(--panel) 100%);background-size:200% 100%;animation:sh 1.2s infinite;border:1px solid var(--line)}
+@keyframes sh{to{background-position:-200% 0}}
+
+/* settings drawer */
+.scrim{position:fixed;inset:0;background:rgba(8,9,12,.45);opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,100vw);background:var(--bg);border-left:1px solid var(--line);z-index:61;transform:translateX(100%);transition:transform .25s cubic-bezier(.2,.8,.2,1);display:flex;flex-direction:column}
+body.drawer-open .scrim{opacity:1;pointer-events:auto}
+body.drawer-open .drawer{transform:none}
+.dh{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--line)}
+.dh h2{font-size:17px;letter-spacing:-.01em}
+.saving{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px}
+.db{overflow:auto;padding:16px 18px 40px;display:flex;flex-direction:column;gap:14px}
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.sec h3{font-size:13.5px;font-weight:700;margin-bottom:3px}
+.sec p.h{font-size:12.5px;color:var(--sub);margin-bottom:10px}
+.kwbox{display:flex;flex-wrap:wrap;gap:6px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);min-height:44px;align-items:center;cursor:text}
+.kwbox:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.kwbox input{flex:1;min-width:130px;border:0;background:transparent;outline:none;padding:4px;font-size:14px}
+.chip{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 4px 0 10px;border-radius:8px;background:var(--brand-soft);font-size:13px;font-weight:500}
+.chip.neg{background:var(--bad-soft);color:var(--bad)}
+.chip button{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;opacity:.6;font-size:15px;line-height:1}
+.chip button:hover{opacity:1;background:rgba(0,0,0,.08)}
+.chip .plus{opacity:.55;font-weight:400;padding:0 1px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}
+.toggle-row+.toggle-row{border-top:1px solid var(--line)}
+.toggle-row .t{font-weight:600;font-size:14px}
+.toggle-row .d{font-size:12.5px;color:var(--sub)}
+.sw2{position:relative;width:44px;height:26px;flex:none}
+.sw2 input{position:absolute;opacity:0;inset:0;cursor:pointer;z-index:1}
+.sw2 span{position:absolute;inset:0;border-radius:999px;background:var(--line);transition:background .15s}
+.sw2 span::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .18s}
+.sw2 input:checked+span{background:var(--ok)}
+.sw2 input:checked+span::after{transform:translateX(18px)}
+.sw2 input:disabled+span{opacity:.45}
+.presets{display:flex;flex-wrap:wrap;gap:6px}
+.presets button{height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);font-size:13px;font-weight:600;color:var(--sub)}
+.presets button.on{border-color:var(--brand);background:var(--brand-soft);color:var(--text)}
+.field{display:flex;gap:8px;align-items:center;margin-top:10px}
+.field label{font-size:12.5px;color:var(--sub);white-space:nowrap}
+.inp{height:38px;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:0 11px;font-size:14px;width:100%}
+.inp:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.inp.num{width:96px}
+.hstack{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.okline{font-size:12.5px;color:var(--ok);font-weight:600}
+
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translate(-50%,16px);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:all .2s;z-index:90;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:calc(100vw - 32px)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.err{background:var(--bad);color:#fff}
+
+@media(max-width:720px){
+  .top-in{flex-wrap:wrap;gap:8px}
+  .brand .word{display:none}
+  .pill{order:3;flex-basis:100%;justify-content:flex-start;overflow:hidden}
+  .pill .ks{overflow:hidden;text-overflow:ellipsis}
+  .hide-sm{display:none}
+  .grid{grid-template-columns:repeat(2,1fr);gap:8px}
+  .body{padding:10px}
+  .name{font-size:13px}
+  .price{font-size:16px}
+  .foot .when{display:none}
+}
+@media(max-width:380px){.grid:not(.list){grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<div class="header">
-  <div class="logo">◈ DROP SCANNER</div>
-  <div class="dot" id="dot"></div>
-  <div class="status" id="status">connecting…</div>
-  <div class="actions">
-    <button class="btn ghost" id="pauseBtn">PAUSE</button>
-    <button class="btn ghost" id="modeBtn">MANUAL MODE</button>
-    <button class="btn" id="scanNow">SCAN NOW</button>
-  </div>
-</div>
 
-<div class="wrap">
-  <div class="stats">
-    <div class="stat"><div class="sv" id="sScans">—</div><div class="sl">Scans run</div></div>
-    <div class="stat"><div class="sv accent" id="sTotal">—</div><div class="sl">Tracked</div></div>
-    <div class="stat"><div class="sv red" id="sHidden">—</div><div class="sl">Hidden</div></div>
-    <div class="stat"><div class="sv blue" id="sInterval">—</div><div class="sl">Interval</div></div>
-    <div class="stat"><div class="sv green" id="sNext">—</div><div class="sl">Next scan</div></div>
-    <div class="stat"><div class="sv" id="sLast">—</div><div class="sl">Last scan (AEST)</div></div>
-  </div>
+<header class="top"><div class="top-in">
+  <div class="brand"><div class="logo">◈</div><span class="word">Drop Scanner</span></div>
+  <div class="pill" id="pill"><span class="led" id="led"></span><span class="ks" id="pillText">Connecting…</span></div>
+  <div class="grow"></div>
+  <button class="btn btn-quiet" id="pauseBtn" title="Pause or resume automatic scanning">Pause</button>
+  <button class="btn btn-primary" id="scanBtn">Scan now</button>
+  <button class="btn btn-quiet icon-btn" id="openSettings" title="Settings" aria-label="Settings">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+  </button>
+</div></header>
 
-  <div class="panel" id="settingsPanel">
-    <div class="panel-head" id="settingsHead">
-      <div class="panel-title">⚙ Settings</div>
-      <div class="chev">▶</div>
-    </div>
-    <div class="panel-body">
-      <div class="field">
-        <label>Keyword groups <span class="hint">— one chip = a group. ALL words in a chip must be in the title (AND); a product matches if ANY chip matches (OR). e.g. "pokemon prismatic" then "pokemon ascended"</span></label>
-        <div class="kwbox" id="kwbox">
-          <input type="text" id="kwInput" placeholder="e.g. pokemon prismatic — Enter to add…" autocomplete="off">
-        </div>
-      </div>
-      <div class="field">
-        <label>Negative groups <span class="hint">— a title is excluded if ALL words in any chip appear in it. e.g. "sword shield"</span></label>
-        <div class="kwbox" id="negKwbox">
-          <input type="text" id="negKwInput" placeholder="e.g. sword shield — Enter to add…" autocomplete="off">
-        </div>
-      </div>
-      <div class="row2">
-        <div class="field">
-          <label>Scan interval <span class="hint">— seconds (min 15, disabled in manual mode)</span></label>
-          <input type="number" id="intervalInput" min="15" step="5">
-        </div>
-        <div class="field">
-          <label>Max results <span class="hint">— per keyword query</span></label>
-          <input type="number" id="maxInput" min="1" max="1000" step="1">
-        </div>
-      </div>
-      <div class="field">
-        <label>Retailers <span class="hint">— which stores to scan. Keyword groups apply to both. Toggles save instantly.</span></label>
-        <div class="actions" style="gap:8px;margin-top:2px">
-          <button class="btn ghost" id="jbToggle">JB HI-FI</button>
-          <button class="btn ghost" id="bwToggle">BIG W</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>Discord webhook <span class="hint" id="whHint"></span></label>
-        <input type="text" id="webhookInput" placeholder="https://discord.com/api/webhooks/…" autocomplete="off">
-      </div>
-      <div class="save-row">
-        <button class="btn" id="saveBtn">SAVE SETTINGS</button>
-        <button class="btn ghost" id="testBtn">TEST DISCORD</button>
-        <span class="saved" id="savedMsg">✓ saved</span>
-      </div>
-    </div>
+<main class="wrap">
+  <div class="banner" id="banner"></div>
+
+  <div class="tiles">
+    <button class="tile on" data-f="all"><div class="n" id="nAll">–</div><div class="l">Tracking</div></button>
+    <button class="tile" data-f="live"><div class="n" id="nLive">–</div><div class="l"><span class="sw" style="background:var(--ok)"></span>Available now</div></button>
+    <button class="tile" data-f="hidden"><div class="n" id="nHidden">–</div><div class="l"><span class="sw" style="background:var(--bad)"></span>Hidden / out of stock</div></button>
+    <button class="tile" data-f="new"><div class="n" id="nNew">–</div><div class="l"><span class="sw" style="background:var(--violet)"></span>New in 24h</div></button>
   </div>
 
   <div class="bar">
-    <div class="title">Results</div>
-    <div class="toolbar">
-      <input class="search" id="searchBox" placeholder="search sku / title…" autocomplete="off">
-      <div class="filters">
-        <button class="fb active" data-f="all">All</button>
-        <button class="fb" data-f="hidden">Hidden</button>
-        <button class="fb" data-f="coming">Coming Soon</button>
-      </div>
-      <div class="filters" id="srcFilters">
-        <button class="fb active" data-s="all">All stores</button>
-        <button class="fb" data-s="jbhifi">JB Hi-Fi</button>
-        <button class="fb" data-s="bigw">BIG W</button>
-      </div>
-      <button class="btn ghost" id="exportBtn">EXPORT CSV</button>
-      <button class="btn danger" id="clearBtn">CLEAR ALL</button>
+    <label class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Search products or SKU" autocomplete="off">
+    </label>
+    <div class="seg" id="storeSeg">
+      <button class="on" data-s="all">All stores</button><button data-s="jbhifi">JB Hi-Fi</button><button data-s="bigw">BIG W</button>
+    </div>
+    <select class="sel" id="sort" aria-label="Sort">
+      <option value="first_seen:-1">Newest first</option>
+      <option value="last_seen:-1">Recently seen</option>
+      <option value="price:1">Price: low to high</option>
+      <option value="price:-1">Price: high to low</option>
+      <option value="title:1">Name A–Z</option>
+    </select>
+    <div class="seg hide-sm" id="viewSeg"><button class="on" data-v="grid" title="Cards" aria-label="Card view"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg></button><button data-v="list" title="List" aria-label="List view"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="4" width="18" height="4" rx="1.5"/><rect x="3" y="10" width="18" height="4" rx="1.5"/><rect x="3" y="16" width="18" height="4" rx="1.5"/></svg></button></div>
+  </div>
+  <div class="count" id="count"></div>
+  <div class="grid" id="grid">
+    <div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div>
+  </div>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Settings">
+  <div class="dh">
+    <h2>Settings</h2>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="saving" id="saving"></span>
+      <button class="btn btn-quiet icon-btn" id="closeSettings" aria-label="Close">✕</button>
     </div>
   </div>
-
-  <div class="table-wrap">
-    <table>
-      <thead><tr id="headRow">
-        <th data-k="source">Store</th><th data-k="sku">SKU</th><th data-k="title">Title</th><th data-k="price">Price</th>
-        <th data-k="status">Status</th><th data-k="release_date">Release</th>
-        <th data-k="limit_per">Limit</th><th data-k="matched">Keywords</th>
-        <th data-k="first_seen">First seen (AEST)</th><th></th>
-      </tr></thead>
-      <tbody id="body"><tr><td colspan="10"><div class="empty">loading…</div></td></tr></tbody>
-    </table>
+  <div class="db">
+    <section class="sec">
+      <h3>What to watch</h3>
+      <p class="h">Each chip is one search. Every word in a chip must be in the product name. Type and press Enter.</p>
+      <div class="kwbox" id="kwBox"><input id="kwIn" placeholder="e.g. pokemon prismatic" enterkeyhint="done"></div>
+    </section>
+    <section class="sec">
+      <h3>Ignore products containing</h3>
+      <p class="h">Hide anything whose name has all the words in any of these chips.</p>
+      <div class="kwbox" id="negBox"><input id="negIn" placeholder="e.g. sword shield" enterkeyhint="done"></div>
+    </section>
+    <section class="sec">
+      <h3>Stores</h3>
+      <div class="toggle-row"><div><div class="t">JB Hi-Fi</div><div class="d" id="jbDesc">Website listings</div></div><label class="sw2"><input type="checkbox" id="jbOn"><span></span></label></div>
+      <div class="toggle-row"><div><div class="t">BIG W</div><div class="d">Website stock only — marketplace sellers excluded</div></div><label class="sw2"><input type="checkbox" id="bwOn"><span></span></label></div>
+    </section>
+    <section class="sec">
+      <h3>Scan schedule</h3>
+      <div class="toggle-row" style="padding-top:4px"><div><div class="t">Automatic scanning</div><div class="d">Off = only scan when you tap Scan now</div></div><label class="sw2"><input type="checkbox" id="autoOn"><span></span></label></div>
+      <div id="schedBox">
+        <p class="h" style="margin:6px 0 8px">Check every</p>
+        <div class="presets" id="presets">
+          <button data-i="30">30s</button><button data-i="60">1 min</button><button data-i="120">2 min</button><button data-i="300">5 min</button><button data-i="900">15 min</button>
+        </div>
+        <div class="field"><label for="intIn">Custom (seconds)</label><input class="inp num" id="intIn" type="number" min="15" step="5" inputmode="numeric"></div>
+      </div>
+      <div class="field"><label for="maxIn">Max results per search</label><input class="inp num" id="maxIn" type="number" min="1" max="1000" inputmode="numeric"></div>
+    </section>
+    <section class="sec">
+      <h3>Discord alerts</h3>
+      <p class="h" id="whState">No webhook set.</p>
+      <input class="inp" id="whIn" type="url" placeholder="Paste a new webhook URL to replace" autocomplete="off">
+      <div class="hstack">
+        <button class="btn btn-quiet" id="whSave">Save webhook</button>
+        <button class="btn btn-quiet" id="whTest">Send test</button>
+      </div>
+    </section>
+    <section class="sec">
+      <h3>Data</h3>
+      <p class="h">Export what's tracked, or wipe it so the next scan starts fresh (everything will alert as new again).</p>
+      <div class="hstack" style="margin-top:0">
+        <button class="btn btn-quiet" id="exportBtn">Export CSV</button>
+        <button class="btn btn-danger" id="clearBtn">Clear all tracked</button>
+      </div>
+    </section>
   </div>
-</div>
+</aside>
 
 <div class="toast" id="toast"></div>
 
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-const tq = token ? ('?token=' + encodeURIComponent(token)) : '';
-function url(path, extra){ let u = path + tq; if(extra) u += (tq?'&':'?') + extra; return u; }
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const api = (path, extra) => path + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '') + (extra ? (TOKEN ? '&' : '?') + extra : '');
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const DAY = 864e5;
 
-let filter = 'all';
-let sourceFilter = 'all';
-let search = '';
-let sortKey = 'last_seen';
-let sortDir = -1;
-let rowsCache = [];
-let keywords = [];
-let negKeywords = [];
-let nextScanTs = null;
-let manualMode = false;
+const state = {
+  rows: [], status: null, cfg: null,
+  tile: 'all', store: 'all', q: '', sort: 'first_seen:-1',
+  view: localGet('ds.view') || 'grid',
+  nextAt: null, scanning: false, scansAtTrigger: null,
+};
 
-function toast(msg, kind){
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.className = 'toast show ' + (kind||'');
-  setTimeout(()=>{ t.className = 'toast ' + (kind||''); }, 2200);
+function localGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+function localSet(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
+
+async function req(path, opts = {}, extra){
+  const r = await fetch(api(path, extra), opts.body ? {method: opts.method || 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(opts.body)} : opts);
+  if (!r.ok) {
+    let msg = r.status;
+    try { msg = (await r.json()).detail || msg; } catch(e){}
+    if (r.status === 401) msg = 'Wrong or missing access token in the URL (?token=…)';
+    throw new Error(msg);
+  }
+  return r.json();
 }
 
-function aest(iso){
-  if(!iso) return '—';
-  try{ return new Date(iso).toLocaleString('en-AU',{timeZone:'Australia/Melbourne',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }
-  catch(e){ return iso; }
+let toastT;
+function toast(msg, err){
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(toastT); toastT = setTimeout(() => t.className = 'toast' + (err ? ' err' : ''), 2600);
 }
 
-function badge(r){
-  if((r.reasons||[]).includes('Embargo')) return '<span class="badge b-hidden">EMBARGO</span>';
-  const s=(r.status||'').toLowerCase();
-  if(r.is_coming||s.includes('comingsoon')) return '<span class="badge b-coming">COMING SOON</span>';
-  if(r.is_hidden||s.includes('nolonger')||s==='hidden') return '<span class="badge b-hidden">HIDDEN</span>';
-  if(s==='available'||s==='instock') return '<span class="badge b-live">LIVE</span>';
-  return '<span class="badge b-def">'+(r.status||'—')+'</span>';
+function ago(iso){
+  if (!iso) return '—';
+  const s = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (s < 45) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  if (s < 86400 * 7) return Math.round(s / 86400) + 'd ago';
+  return new Date(iso).toLocaleDateString('en-AU', {day:'numeric', month:'short'});
 }
+function melb(iso){
+  try { return new Date(iso).toLocaleString('en-AU', {timeZone:'Australia/Melbourne', day:'numeric', month:'short', hour:'numeric', minute:'2-digit'}); }
+  catch(e){ return iso || ''; }
+}
+function dur(sec){ return sec >= 60 ? (sec % 60 ? Math.floor(sec/60)+'m '+(sec%60)+'s' : sec/60 + ' min') : sec + 's'; }
 
-// ── keyword chips ──────────────────────────────────────────────────────────
-function renderChips(){
-  const box = document.getElementById('kwbox');
-  box.querySelectorAll('.chip').forEach(c=>c.remove());
-  const input = document.getElementById('kwInput');
-  keywords.forEach((k,i)=>{
-    const el = document.createElement('span');
-    el.className = 'chip';
-    el.innerHTML = k.replace(/</g,'&lt;') + ' <b data-i="'+i+'">×</b>';
-    box.insertBefore(el, input);
+// ── classification ──────────────────────────────────────────────────────────
+function kind(r){
+  const s = (r.status || '').toLowerCase();
+  if ((r.reasons || []).includes('Embargo')) return ['hidden', 'Embargoed'];
+  if (r.is_coming || s.includes('comingsoon')) return ['coming', 'Coming soon'];
+  if (s === 'preorder') return ['coming', 'Pre-order'];
+  if (s === 'available' || s === 'instock') return r.is_hidden ? ['hidden', 'Hidden listing'] : ['live', 'Available'];
+  if (s === 'outofstock') return ['hidden', 'Out of stock'];
+  if (s.includes('nolonger')) return ['hidden', 'No longer available'];
+  if (r.is_hidden) return ['hidden', 'Hidden'];
+  return ['other', r.status || 'Unknown'];
+}
+const isNew = r => r.first_seen && (Date.now() - new Date(r.first_seen)) < DAY;
+
+// ── rendering ───────────────────────────────────────────────────────────────
+function filtered(){
+  let rows = state.rows;
+  if (state.store !== 'all') rows = rows.filter(r => r.source === state.store);
+  if (state.tile === 'live') rows = rows.filter(r => kind(r)[0] === 'live');
+  else if (state.tile === 'hidden') rows = rows.filter(r => kind(r)[0] !== 'live');
+  else if (state.tile === 'new') rows = rows.filter(isNew);
+  if (state.q) {
+    const words = state.q.toLowerCase().split(/\s+/).filter(Boolean);
+    rows = rows.filter(r => { const h = ((r.title||'') + ' ' + (r.sku||'')).toLowerCase(); return words.every(w => h.includes(w)); });
+  }
+  const [k, d] = state.sort.split(':'); const dir = +d;
+  return rows.slice().sort((a, b) => {
+    let x = a[k], y = b[k];
+    if (x == null || x === '') return 1; if (y == null || y === '') return -1;
+    return (typeof x === 'number' ? x - y : String(x).localeCompare(String(y))) * dir;
   });
-  box.querySelectorAll('.chip b').forEach(b=>b.addEventListener('click',()=>{
-    keywords.splice(+b.dataset.i,1); renderChips();
-  }));
-}
-document.getElementById('kwInput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'||e.key===','){
-    e.preventDefault();
-    const v = e.target.value.trim().toLowerCase();
-    if(v && !keywords.includes(v)){ keywords.push(v); }
-    e.target.value=''; renderChips();
-  }else if(e.key==='Backspace' && !e.target.value && keywords.length){
-    keywords.pop(); renderChips();
-  }
-});
-
-// ── negative keyword chips ─────────────────────────────────────────────────
-function renderNegChips(){
-  const box = document.getElementById('negKwbox');
-  box.querySelectorAll('.nchip').forEach(c=>c.remove());
-  const input = document.getElementById('negKwInput');
-  negKeywords.forEach((k,i)=>{
-    const el = document.createElement('span');
-    el.className = 'nchip';
-    el.innerHTML = '⊘ ' + k.replace(/</g,'&lt;') + ' <b data-i="'+i+'">×</b>';
-    box.insertBefore(el, input);
-  });
-  box.querySelectorAll('.nchip b').forEach(b=>b.addEventListener('click',()=>{
-    negKeywords.splice(+b.dataset.i,1); renderNegChips();
-  }));
-}
-document.getElementById('negKwInput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'||e.key===','){
-    e.preventDefault();
-    const v = e.target.value.trim().toLowerCase();
-    if(v && !negKeywords.includes(v)){ negKeywords.push(v); }
-    e.target.value=''; renderNegChips();
-  }else if(e.key==='Backspace' && !e.target.value && negKeywords.length){
-    negKeywords.pop(); renderNegChips();
-  }
-});
-
-// ── settings panel ─────────────────────────────────────────────────────────
-document.getElementById('settingsHead').addEventListener('click',()=>{
-  document.getElementById('settingsPanel').classList.toggle('open');
-});
-
-function applyManualModeUI(isManual){
-  const modeBtn = document.getElementById('modeBtn');
-  const intervalInput = document.getElementById('intervalInput');
-  modeBtn.textContent = isManual ? 'AUTO MODE' : 'MANUAL MODE';
-  modeBtn.className = isManual ? 'btn manual' : 'btn ghost';
-  intervalInput.disabled = isManual;
-  intervalInput.style.opacity = isManual ? '0.4' : '1';
 }
 
-function applyRetailerUI(c){
-  const jb = document.getElementById('jbToggle');
-  const bw = document.getElementById('bwToggle');
-  if(c.jbhifi_ready === false){
-    jb.textContent = 'JB HI-FI: NO CREDS'; jb.className = 'btn ghost'; jb.disabled = true;
-  }else{
-    jb.disabled = false;
-    jb.textContent = 'JB HI-FI: ' + (c.jbhifi_on ? 'ON' : 'OFF');
-    jb.className = c.jbhifi_on ? 'btn manual' : 'btn ghost';
-  }
-  bw.textContent = 'BIG W: ' + (c.bigw_on ? 'ON' : 'OFF');
-  bw.className = c.bigw_on ? 'btn manual' : 'btn ghost';
+function card(r){
+  const [k, label] = kind(r);
+  const href = r.url || '';
+  const store = r.source === 'bigw' ? '<span class="tag t-bw">BIG W</span>' : '<span class="tag t-jb">JB HI-FI</span>';
+  const img = r.image ? '<img loading="lazy" src="'+esc(r.image)+'" alt="" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{className:\'ph\',textContent:\'◈\'}))">' : '<span class="ph">◈</span>';
+  const kws = (r.matched || []).map(m => '<span class="mini kw">'+esc(m)+'</span>').join('');
+  const extra = (r.reasons || []).filter(x => !['OutOfStock','Preorder','Embargo'].includes(x)).map(x => '<span class="mini">'+esc(x.replace(/([a-z])([A-Z])/g,'$1 $2'))+'</span>').join('');
+  const lim = r.limit_per ? '<span class="mini lim">Limit '+esc(r.limit_per)+'</span>' : '';
+  const rel = r.release_date ? '<span class="mini">Release '+esc(r.release_date)+'</span>' : '';
+  const chips = kws + lim + rel + extra;
+  const title = href ? '<a class="name" href="'+esc(href)+'" target="_blank" rel="noopener">'+esc(r.title)+'</a>' : '<div class="name">'+esc(r.title)+'</div>';
+  return '<article class="card'+(isNew(r)?' fresh':'')+'">'
+    + '<div class="thumb">'+img+'<div class="tags">'+store+(isNew(r)?'<span class="tag t-new">NEW</span>':'')+'</div></div>'
+    + '<div class="body">'
+    +   '<span class="status s-'+k+'">'+esc(label)+'</span>'
+    +   title
+    +   '<div class="row"><span class="price">'+(r.price != null ? '$'+Number(r.price).toFixed(2) : '—')+'</span><span class="sku">'+esc(r.sku)+'</span></div>'
+    +   (chips ? '<div class="chips">'+chips+'</div>' : '')
+    +   '<div class="foot"><span class="when" title="First seen '+esc(melb(r.first_seen))+'">Found '+ago(r.first_seen)+'</span>'
+    +     '<span class="acts">'
+    +       (href ? '<a class="ghost" href="'+esc(href)+'" target="_blank" rel="noopener" title="Open on store site">↗</a>' : '')
+    +       '<button class="ghost rm" data-id="'+esc(r.id)+'" title="Stop tracking this item">✕</button>'
+    +     '</span></div>'
+    + '</div></article>';
 }
 
-async function loadConfig(){
-  try{
-    const c = await fetch(url('/api/config')).then(r=>r.json());
-    keywords = (c.keywords||[]).slice();
-    negKeywords = (c.neg_keywords||[]).slice();
-    renderChips();
-    renderNegChips();
-    document.getElementById('intervalInput').value = c.interval;
-    document.getElementById('maxInput').value = c.max_results;
-    document.getElementById('whHint').textContent = c.webhook_set ? ('— set ('+c.webhook_hint+')') : '— none set';
-    manualMode = !!c.manual_only;
-    applyManualModeUI(manualMode);
-    applyRetailerUI(c);
-  }catch(e){}
-}
+function render(){
+  const all = state.rows.filter(r => state.store === 'all' || r.source === state.store);
+  $('#nAll').textContent = all.length;
+  $('#nLive').textContent = all.filter(r => kind(r)[0] === 'live').length;
+  $('#nHidden').textContent = all.filter(r => kind(r)[0] !== 'live').length;
+  $('#nNew').textContent = all.filter(isNew).length;
 
-async function setRetailer(field, on){
-  try{
-    const body = {}; body[field] = on;
-    await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    toast((field==='jbhifi_on'?'JB Hi-Fi':'BIG W')+' '+(on?'enabled':'disabled'),'ok');
-    await loadConfig(); await tick();
-  }catch(e){ toast('failed to toggle retailer','err'); }
-}
-document.getElementById('jbToggle').addEventListener('click',function(){ setRetailer('jbhifi_on', this.className.indexOf('manual')<0); });
-document.getElementById('bwToggle').addEventListener('click',function(){ setRetailer('bigw_on', this.className.indexOf('manual')<0); });
+  const rows = filtered();
+  const g = $('#grid');
+  g.classList.toggle('list', state.view === 'list');
+  $('#count').textContent = state.rows.length ? (rows.length === all.length ? rows.length + ' products' : rows.length + ' of ' + all.length + ' products') : '';
 
-document.getElementById('saveBtn').addEventListener('click',async()=>{
-  const pend = document.getElementById('kwInput').value.trim().toLowerCase();
-  if(pend && !keywords.includes(pend)){ keywords.push(pend); document.getElementById('kwInput').value=''; renderChips(); }
-  const negPend = document.getElementById('negKwInput').value.trim().toLowerCase();
-  if(negPend && !negKeywords.includes(negPend)){ negKeywords.push(negPend); document.getElementById('negKwInput').value=''; renderNegChips(); }
-  const body = {
-    keywords,
-    neg_keywords: negKeywords,
-    interval: +document.getElementById('intervalInput').value,
-    max_results: +document.getElementById('maxInput').value,
-  };
-  const wh = document.getElementById('webhookInput').value.trim();
-  if(wh) body.webhook = wh;
-  try{
-    const r = await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok) throw new Error((await r.json()).detail || r.status);
-    document.getElementById('webhookInput').value='';
-    const m=document.getElementById('savedMsg'); m.classList.add('show'); setTimeout(()=>m.classList.remove('show'),1800);
-    toast('settings saved','ok');
-    await loadConfig(); await tick();
-  }catch(e){ toast('save failed: '+e.message,'err'); }
-});
-
-document.getElementById('testBtn').addEventListener('click',async()=>{
-  const wh = document.getElementById('webhookInput').value.trim();
-  if(wh){
-    await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({webhook:wh})});
-    document.getElementById('webhookInput').value=''; await loadConfig();
-  }
-  try{
-    const r = await fetch(url('/api/test-discord'),{method:'POST'});
-    if(!r.ok) throw new Error((await r.json()).detail || r.status);
-    toast('test sent to Discord','ok');
-  }catch(e){ toast('test failed: '+e.message,'err'); }
-});
-
-// ── controls ───────────────────────────────────────────────────────────────
-document.getElementById('pauseBtn').addEventListener('click',async()=>{
-  const btn=document.getElementById('pauseBtn');
-  const action = btn.dataset.paused==='1' ? 'resume' : 'pause';
-  try{
-    await fetch(url('/api/control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
-    toast(action==='pause'?'scanning paused':'scanning resumed','ok');
-    await tick();
-  }catch(e){ toast('failed','err'); }
-});
-
-document.getElementById('modeBtn').addEventListener('click',async()=>{
-  const newMode = !manualMode;
-  try{
-    await fetch(url('/api/config'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({manual_only:newMode})});
-    toast(newMode ? 'switched to manual mode — Scan Now to run a scan' : 'switched to auto mode','ok');
-    await tick();
-  }catch(e){ toast('failed to change mode','err'); }
-});
-
-document.getElementById('scanNow').addEventListener('click',async()=>{
-  const btn=document.getElementById('scanNow'); btn.disabled=true; btn.textContent='SCANNING…';
-  try{ await fetch(url('/api/control'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'scan'})}); toast('scan triggered','ok'); }
-  catch(e){ toast('scan failed','err'); }
-  btn.disabled=false; btn.textContent='SCAN NOW';
-  await tick();
-});
-
-let clearArmed=false;
-document.getElementById('clearBtn').addEventListener('click',async()=>{
-  const btn=document.getElementById('clearBtn');
-  if(!clearArmed){ clearArmed=true; btn.textContent='CONFIRM CLEAR'; setTimeout(()=>{clearArmed=false;btn.textContent='CLEAR ALL';},3000); return; }
-  clearArmed=false; btn.textContent='CLEAR ALL';
-  try{ await fetch(url('/api/results'),{method:'DELETE'}); toast('all tracked SKUs cleared','ok'); await tick(); }
-  catch(e){ toast('clear failed','err'); }
-});
-
-document.getElementById('exportBtn').addEventListener('click',()=>{
-  window.open(url('/api/export.csv','filter='+filter+'&source='+sourceFilter),'_blank');
-});
-
-async function deleteRow(id){
-  try{ await fetch(url('/api/results/'+encodeURIComponent(id)),{method:'DELETE'}); toast('removed','ok'); await loadResults(); }
-  catch(e){ toast('delete failed','err'); }
-}
-
-// ── search + sort ──────────────────────────────────────────────────────────
-document.getElementById('searchBox').addEventListener('input',e=>{ search=e.target.value.toLowerCase(); renderRows(); });
-document.getElementById('headRow').querySelectorAll('th[data-k]').forEach(th=>th.addEventListener('click',()=>{
-  const k=th.dataset.k;
-  if(sortKey===k) sortDir*=-1; else { sortKey=k; sortDir=1; }
-  renderRows();
-}));
-
-// status filters (All / Hidden / Coming) — scoped so they don't touch store filters
-document.querySelectorAll('.filters:not(#srcFilters) .fb').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('.filters:not(#srcFilters) .fb').forEach(x=>x.classList.remove('active'));
-  b.classList.add('active'); filter=b.dataset.f; loadResults();
-}));
-// store filters (All stores / JB Hi-Fi / BIG W)
-document.querySelectorAll('#srcFilters .fb').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('#srcFilters .fb').forEach(x=>x.classList.remove('active'));
-  b.classList.add('active'); sourceFilter=b.dataset.s; loadResults();
-}));
-
-// ── data ───────────────────────────────────────────────────────────────────
-async function loadStatus(){
-  try{
-    const s = await fetch(url('/api/status')).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
-    manualMode = !!s.manual_only;
-    applyManualModeUI(manualMode);
-    document.getElementById('sScans').textContent = s.scans;
-    document.getElementById('sInterval').textContent = manualMode ? 'manual' : (s.interval>=60 ? Math.round(s.interval/60)+'m' : s.interval+'s');
-    document.getElementById('sLast').textContent = aest(s.last_scan);
-    nextScanTs = s.next_scan ? new Date(s.next_scan).getTime() : null;
-    const pauseBtn=document.getElementById('pauseBtn');
-    if(s.paused){
-      pauseBtn.textContent='RESUME'; pauseBtn.dataset.paused='1';
-      document.getElementById('dot').className='dot paused';
-      document.getElementById('status').textContent='paused · '+ (s.keywords||[]).join(', ');
-      document.getElementById('sNext').textContent='paused';
-    }else if(s.last_error){
-      document.getElementById('dot').className='dot err';
-      document.getElementById('status').textContent='error: '+s.last_error;
-      pauseBtn.textContent='PAUSE'; pauseBtn.dataset.paused='0';
-    }else{
-      pauseBtn.textContent='PAUSE'; pauseBtn.dataset.paused='0';
-      document.getElementById('dot').className='dot live';
-      const modeStr = manualMode ? 'manual mode' : 'every '+(s.interval>=60?Math.round(s.interval/60)+'min':s.interval+'s');
-      const srcStr = (s.sources||[]).map(x=>x==='bigw'?'BIG W':'JB Hi-Fi').join(' + ') || 'no stores';
-      document.getElementById('status').textContent='live · '+srcStr+' · '+(s.keywords||[]).join(', ')+' · '+modeStr;
-    }
-  }catch(e){
-    document.getElementById('dot').className='dot err';
-    document.getElementById('status').textContent='cannot reach backend'+(token?'':' (need ?token= ?)');
-  }
-}
-
-function tickCountdown(){
-  const el=document.getElementById('sNext');
-  const pauseBtn=document.getElementById('pauseBtn');
-  if(pauseBtn.dataset.paused==='1'){ el.textContent='paused'; return; }
-  if(manualMode){ el.textContent='manual'; return; }
-  if(!nextScanTs){ el.textContent='—'; return; }
-  const secs=Math.max(0,Math.round((nextScanTs-Date.now())/1000));
-  const m=Math.floor(secs/60), s=secs%60;
-  el.textContent = m>0 ? (m+'m '+String(s).padStart(2,'0')+'s') : (s+'s');
-}
-
-async function loadResults(){
-  try{
-    const rows = await fetch(url('/api/results','filter='+filter+'&source='+sourceFilter)).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
-    rowsCache = rows;
-    document.getElementById('sTotal').textContent = rows.length;
-    document.getElementById('sHidden').textContent = rows.filter(x=>x.is_hidden).length;
-    renderRows();
-  }catch(e){
-    document.getElementById('body').innerHTML='<tr><td colspan="10"><div class="empty">failed to load: '+e.message+'</div></td></tr>';
-  }
-}
-
-function renderRows(){
-  let rows = rowsCache.slice();
-  if(search){
-    rows = rows.filter(r => (r.sku||'').toLowerCase().includes(search) || (r.title||'').toLowerCase().includes(search));
-  }
-  rows.sort((a,b)=>{
-    let x=a[sortKey], y=b[sortKey];
-    if(sortKey==='matched') { x=(x||[]).join(); y=(y||[]).join(); }
-    if(x==null) x=''; if(y==null) y='';
-    if(typeof x==='number' && typeof y==='number') return (x-y)*sortDir;
-    return String(x).localeCompare(String(y))*sortDir;
-  });
-  document.querySelectorAll('#headRow th[data-k]').forEach(th=>{
-    const base=th.textContent.replace(/[▲▼]\s*$/,'').trim();
-    th.innerHTML = base + (th.dataset.k===sortKey ? ' <span class="arr">'+(sortDir>0?'▲':'▼')+'</span>' : '');
-  });
-  if(!rows.length){
-    document.getElementById('body').innerHTML='<tr><td colspan="10"><div class="empty">'+(search?'no matches':'no results yet')+'</div></td></tr>';
+  if (!rows.length) {
+    const noKw = state.cfg && !(state.cfg.keywords || []).length;
+    let h, p, cta = '';
+    if (!state.rows.length && noKw) { h = 'Nothing to watch yet'; p = 'Add a keyword like "pokemon prismatic" and run a scan.'; cta = '<button class="btn btn-primary" data-open-settings>Add keywords</button>'; }
+    else if (!state.rows.length) { h = 'No products yet'; p = 'Run a scan to find matching products.'; cta = '<button class="btn btn-primary" data-scan>Scan now</button>'; }
+    else { h = 'No matches'; p = 'Try a different filter or search.'; cta = '<button class="btn btn-quiet" data-reset>Clear filters</button>'; }
+    g.innerHTML = '<div class="empty"><h3>'+h+'</h3><div>'+p+'</div>'+cta+'</div>';
     return;
   }
-  document.getElementById('body').innerHTML = rows.map(r=>{
-    const href = r.url || (r.handle ? 'https://www.jbhifi.com.au/products/'+r.handle : '');
-    const link = href ? '<a href="'+esc(href)+'" target="_blank" rel="noopener">'+esc(r.title)+'</a>' : esc(r.title);
-    const store = r.source==='bigw'
-      ? '<span class="store st-bw">BIG W</span>'
-      : '<span class="store st-jb">JB HI-FI</span>';
-    const kws = (r.matched||[]).map(k=>'<span class="kw">'+esc(k)+'</span>').join('');
-    const reasons = (r.reasons||[]).length ? '<div class="reasons">'+r.reasons.map(x=>'<span class="rtag">'+esc(x)+'</span>').join('')+'</div>' : '';
-    return '<tr>'
-      +'<td>'+store+'</td>'
-      +'<td class="sku">'+esc(r.sku)+'</td>'
-      +'<td class="ttl">'+link+reasons+'</td>'
-      +'<td class="price">'+(r.price?'$'+r.price:'—')+'</td>'
-      +'<td>'+badge(r)+'</td>'
-      +'<td class="mono">'+(r.release_date||'—')+'</td>'
-      +'<td class="mono" style="color:'+(r.limit_per?'var(--accent2)':'var(--muted)')+'">'+(r.limit_per||'—')+'</td>'
-      +'<td>'+kws+'</td>'
-      +'<td class="mono">'+aest(r.first_seen)+'</td>'
-      +'<td><span class="del" data-id="'+esc(r.id)+'">×</span></td>'
-      +'</tr>';
-  }).join('');
-  document.querySelectorAll('.del').forEach(d=>d.addEventListener('click',()=>deleteRow(d.dataset.id)));
+  g.innerHTML = rows.map(card).join('');
 }
 
-function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function renderStatus(){
+  const s = state.status; if (!s) return;
+  const led = $('#led'), txt = $('#pillText');
+  const kws = (s.keywords || []).length;
+  const stores = (s.sources || []).map(x => x === 'bigw' ? 'BIG W' : 'JB Hi-Fi').join(' + ') || 'no stores';
+  let line;
+  if (state.scanning) { led.className = 'led scan'; line = '<b>Scanning…</b>'; }
+  else if (s.paused) { led.className = 'led paused'; line = '<b>Paused</b> · ' + stores; }
+  else if (s.manual_only) { led.className = 'led live'; line = '<b>Manual</b> · ' + stores + ' · last ' + ago(s.last_scan); }
+  else { led.className = s.last_error ? 'led err' : 'led live'; line = '<b id="cd">Next scan …</b> · ' + stores + ' · ' + kws + ' search' + (kws === 1 ? '' : 'es'); }
+  txt.innerHTML = line;
+  state.nextAt = (!s.paused && !s.manual_only && s.next_scan) ? new Date(s.next_scan).getTime() : null;
+  countdown();
 
-async function tick(){ await loadStatus(); await loadResults(); }
+  const pb = $('#pauseBtn');
+  pb.textContent = s.paused ? 'Resume' : 'Pause';
+  pb.style.display = s.manual_only ? 'none' : '';
 
-loadConfig();
-tick();
-setInterval(tick, 30000);
-setInterval(tickCountdown, 1000);
+  const b = $('#banner');
+  if (s.last_error) { b.className = 'banner show'; b.textContent = 'Last scan had a problem: ' + s.last_error; }
+  else if (!(s.sources || []).length) { b.className = 'banner info show'; b.innerHTML = 'Both stores are switched off. <a href="#" data-open-settings>Turn one on in Settings</a>.'; }
+  else b.className = 'banner';
+}
+
+function countdown(){
+  const el = $('#cd'); if (!el || state.scanning) return;
+  if (!state.nextAt) { el.textContent = 'Waiting'; return; }
+  const sec = Math.max(0, Math.round((state.nextAt - Date.now()) / 1000));
+  el.textContent = sec === 0 ? 'Scanning soon' : 'Next scan in ' + (sec >= 60 ? Math.floor(sec/60) + 'm ' + String(sec%60).padStart(2,'0') + 's' : sec + 's');
+}
+
+// ── data loading ────────────────────────────────────────────────────────────
+async function loadStatus(){
+  try {
+    state.status = await req('/api/status');
+    if (state.scanning && state.status.scans > state.scansAtTrigger) {
+      state.scanning = false;
+      await loadResults();
+      toast('Scan finished');
+      setScanBtn();
+    }
+    renderStatus();
+  } catch(e) {
+    $('#led').className = 'led err'; $('#pillText').innerHTML = '<b>Can\'t reach scanner</b>';
+    const b = $('#banner'); b.className = 'banner show'; b.textContent = e.message;
+  }
+}
+async function loadResults(){
+  try { state.rows = await req('/api/results'); render(); }
+  catch(e) { $('#grid').innerHTML = '<div class="empty"><h3>Couldn\'t load products</h3><div>'+esc(e.message)+'</div></div>'; }
+}
+async function loadConfig(){
+  try { state.cfg = await req('/api/config'); fillSettings(); } catch(e){}
+}
+
+// ── top bar actions ─────────────────────────────────────────────────────────
+function setScanBtn(){
+  const b = $('#scanBtn');
+  b.disabled = state.scanning;
+  b.innerHTML = state.scanning ? '<span class="spin"></span>Scanning' : 'Scan now';
+}
+async function scanNow(){
+  if (state.scanning) return;
+  try {
+    const r = await req('/api/control', {body: {action: 'scan'}});
+    state.scanning = true; state.scansAtTrigger = r.scans; setScanBtn(); renderStatus();
+    const started = Date.now();
+    const poll = setInterval(async () => {
+      if (!state.scanning || Date.now() - started > 120000) { clearInterval(poll); if (state.scanning) { state.scanning = false; setScanBtn(); renderStatus(); } return; }
+      await loadStatus();
+    }, 2000);
+  } catch(e) { toast(e.message, true); }
+}
+$('#scanBtn').onclick = scanNow;
+$('#pauseBtn').onclick = async () => {
+  const action = state.status && state.status.paused ? 'resume' : 'pause';
+  try { await req('/api/control', {body: {action}}); toast(action === 'pause' ? 'Automatic scanning paused' : 'Scanning resumed'); await loadStatus(); }
+  catch(e) { toast(e.message, true); }
+};
+
+// ── filters ─────────────────────────────────────────────────────────────────
+$$('.tile').forEach(t => t.onclick = () => { state.tile = t.dataset.f; $$('.tile').forEach(x => x.classList.toggle('on', x === t)); render(); });
+$$('#storeSeg button').forEach(b => b.onclick = () => { state.store = b.dataset.s; $$('#storeSeg button').forEach(x => x.classList.toggle('on', x === b)); render(); });
+$$('#viewSeg button').forEach(b => { b.classList.toggle('on', b.dataset.v === state.view); b.onclick = () => { state.view = b.dataset.v; localSet('ds.view', state.view); $$('#viewSeg button').forEach(x => x.classList.toggle('on', x === b)); render(); }; });
+$('#sort').onchange = e => { state.sort = e.target.value; render(); };
+let qT; $('#q').oninput = e => { clearTimeout(qT); qT = setTimeout(() => { state.q = e.target.value.trim(); render(); }, 120); };
+
+document.addEventListener('click', async e => {
+  const rm = e.target.closest('.rm');
+  if (rm) {
+    const id = rm.dataset.id;
+    const card = rm.closest('.card'); card.style.opacity = '.4';
+    try { await req('/api/results/' + encodeURIComponent(id), {method: 'DELETE'}); state.rows = state.rows.filter(r => r.id !== id); render(); toast('Removed — it will come back if a scan finds it again'); }
+    catch(err) { card.style.opacity = ''; toast(err.message, true); }
+    return;
+  }
+  if (e.target.closest('[data-open-settings]')) { e.preventDefault(); openDrawer(); }
+  if (e.target.closest('[data-scan]')) scanNow();
+  if (e.target.closest('[data-reset]')) {
+    state.tile = 'all'; state.store = 'all'; state.q = ''; $('#q').value = '';
+    $$('.tile').forEach(x => x.classList.toggle('on', x.dataset.f === 'all'));
+    $$('#storeSeg button').forEach(x => x.classList.toggle('on', x.dataset.s === 'all'));
+    render();
+  }
+});
+
+// ── settings drawer ─────────────────────────────────────────────────────────
+function openDrawer(){ document.body.classList.add('drawer-open'); loadConfig(); }
+function closeDrawer(){ document.body.classList.remove('drawer-open'); }
+$('#openSettings').onclick = openDrawer;
+$('#closeSettings').onclick = closeDrawer;
+$('#scrim').onclick = closeDrawer;
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+
+let saveT;
+function saving(on, ok){
+  const el = $('#saving');
+  clearTimeout(saveT);
+  if (on) el.innerHTML = '<span class="spin"></span>Saving';
+  else if (ok) { el.innerHTML = '<span class="okline">✓ Saved</span>'; saveT = setTimeout(() => el.innerHTML = '', 1600); }
+  else el.innerHTML = '';
+}
+async function save(patch, msg){
+  saving(true);
+  try {
+    const r = await req('/api/config', {body: patch});
+    state.cfg = r.config; fillSettings(); saving(false, true);
+    if (msg) toast(msg);
+    loadStatus();
+    return true;
+  } catch(e) { saving(false); toast('Couldn\'t save: ' + e.message, true); fillSettings(); return false; }
+}
+
+function chipBox(boxSel, inSel, key, neg){
+  const box = $(boxSel), input = $(inSel);
+  box.onclick = e => { if (e.target === box) input.focus(); };
+  const commit = () => {
+    const v = input.value.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!v) return;
+    const cur = state.cfg[key] || [];
+    input.value = '';
+    if (cur.includes(v)) { toast('Already added'); return; }
+    save({[key]: cur.concat(v)}, neg ? 'Now ignoring "' + v + '"' : 'Watching "' + v + '" — next scan will include it');
+  };
+  input.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
+    else if (e.key === 'Backspace' && !input.value && (state.cfg[key] || []).length) {
+      save({[key]: state.cfg[key].slice(0, -1)});
+    }
+  };
+  input.onblur = commit;
+  box.addEventListener('click', e => {
+    const x = e.target.closest('.chip button'); if (!x) return;
+    save({[key]: state.cfg[key].filter((_, i) => i !== +x.dataset.i)});
+  });
+}
+chipBox('#kwBox', '#kwIn', 'keywords', false);
+chipBox('#negBox', '#negIn', 'neg_keywords', true);
+
+function drawChips(boxSel, inSel, list, neg){
+  const box = $(boxSel), input = $(inSel);
+  $$(boxSel + ' .chip').forEach(c => c.remove());
+  list.forEach((k, i) => {
+    const words = esc(k).split(' ').join(' <span class="plus">+</span> ');
+    const el = document.createElement('span');
+    el.className = 'chip' + (neg ? ' neg' : '');
+    el.innerHTML = words + '<button data-i="'+i+'" aria-label="Remove">×</button>';
+    box.insertBefore(el, input);
+  });
+}
+
+function fillSettings(){
+  const c = state.cfg; if (!c) return;
+  drawChips('#kwBox', '#kwIn', c.keywords || [], false);
+  drawChips('#negBox', '#negIn', c.neg_keywords || [], true);
+  const jb = $('#jbOn');
+  jb.checked = !!c.jbhifi_on && c.jbhifi_ready !== false;
+  jb.disabled = c.jbhifi_ready === false;
+  $('#jbDesc').textContent = c.jbhifi_ready === false ? 'Unavailable — Algolia credentials not set on the server' : 'Website listings';
+  $('#bwOn').checked = !!c.bigw_on;
+  $('#autoOn').checked = !c.manual_only;
+  $('#schedBox').style.display = c.manual_only ? 'none' : '';
+  $$('#presets button').forEach(b => b.classList.toggle('on', +b.dataset.i === c.interval));
+  if (document.activeElement !== $('#intIn')) $('#intIn').value = c.interval;
+  if (document.activeElement !== $('#maxIn')) $('#maxIn').value = c.max_results;
+  $('#whState').textContent = c.webhook_set ? 'Alerts are going to webhook ending in ' + c.webhook_hint.replace('…','') + '.' : 'No webhook set — you won\'t get Discord alerts.';
+}
+
+$('#jbOn').onchange = e => save({jbhifi_on: e.target.checked}, 'JB Hi-Fi ' + (e.target.checked ? 'on' : 'off'));
+$('#bwOn').onchange = e => save({bigw_on: e.target.checked}, 'BIG W ' + (e.target.checked ? 'on' : 'off'));
+$('#autoOn').onchange = e => save({manual_only: !e.target.checked}, e.target.checked ? 'Automatic scanning on' : 'Manual mode — tap Scan now to scan');
+$$('#presets button').forEach(b => b.onclick = () => save({interval: +b.dataset.i}, 'Scanning every ' + dur(+b.dataset.i)));
+$('#intIn').onchange = e => { const v = +e.target.value; if (v) save({interval: v}, 'Scanning every ' + dur(Math.max(15, v))); };
+$('#maxIn').onchange = e => { const v = +e.target.value; if (v) save({max_results: v}); };
+$('#whSave').onclick = async () => {
+  const v = $('#whIn').value.trim();
+  if (!v) { toast('Paste a webhook URL first', true); return; }
+  if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(v)) { toast('That doesn\'t look like a Discord webhook URL', true); return; }
+  if (await save({webhook: v}, 'Webhook saved')) $('#whIn').value = '';
+};
+$('#whTest').onclick = async () => {
+  const b = $('#whTest'); b.disabled = true;
+  try { await req('/api/test-discord', {method: 'POST'}); toast('Test message sent — check Discord'); }
+  catch(e) { toast(e.message, true); }
+  b.disabled = false;
+};
+$('#exportBtn').onclick = () => window.open(api('/api/export.csv'), '_blank');
+let clearArm;
+$('#clearBtn').onclick = async () => {
+  const b = $('#clearBtn');
+  if (!clearArm) { clearArm = setTimeout(() => { clearArm = null; b.textContent = 'Clear all tracked'; }, 3500); b.textContent = 'Tap again to confirm'; return; }
+  clearTimeout(clearArm); clearArm = null; b.textContent = 'Clear all tracked';
+  try { await req('/api/results', {method: 'DELETE'}); state.rows = []; render(); toast('Cleared'); }
+  catch(e) { toast(e.message, true); }
+};
+
+// ── boot ────────────────────────────────────────────────────────────────────
+(async () => {
+  await Promise.all([loadConfig(), loadStatus(), loadResults()]);
+  setInterval(countdown, 1000);
+  setInterval(() => { if (!state.scanning) { loadStatus(); loadResults(); } }, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadStatus(); loadResults(); } });
+})();
 </script>
 </body>
 </html>

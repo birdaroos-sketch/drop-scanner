@@ -168,7 +168,8 @@ def _create_products(c: sqlite3.Connection) -> None:
             handle        TEXT,
             first_seen    TEXT,
             last_seen     TEXT,
-            last_status   TEXT
+            last_status   TEXT,
+            image         TEXT
         )
     """)
 
@@ -181,6 +182,7 @@ def init_db() -> None:
         ).fetchone()
         if not exists:
             _create_products(c)
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('bigw_marketplace_purged','1')")
             return
         cols = [r[1] for r in c.execute("PRAGMA table_info(products)")]
         if "id" not in cols:
@@ -199,6 +201,8 @@ def init_db() -> None:
             """)
             c.execute("DROP TABLE products_old")
             print("[db] migrated products table to multi-source schema", flush=True)
+        if "image" not in [r[1] for r in c.execute("PRAGMA table_info(products)")]:
+            c.execute("ALTER TABLE products ADD COLUMN image TEXT")
     # One-time cleanup: remove all BIG W rows so marketplace items don't persist.
     # They will be re-discovered on the next scan with the marketplace filter active.
     if get_meta("bigw_marketplace_purged", "") != "1":
@@ -584,12 +588,12 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                 c.execute("""
                     INSERT INTO products
                     (id,source,sku,title,price,status,release_date,limit_per,is_hidden,is_coming,
-                     reasons,matched,handle,first_seen,last_seen,last_status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     reasons,matched,handle,first_seen,last_seen,last_status,image)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     pid, rec["source"], rec["sku"], rec["title"], rec["price"], rec["status"],
                     rec["release_date"], rec["limit_per"], rec["is_hidden"], rec["is_coming"],
-                    rec["reasons"], rec["matched"], rec["handle"], now, now, rec["status"],
+                    rec["reasons"], rec["matched"], rec["handle"], now, now, rec["status"], rec.get("image") or "",
                 ))
                 if rec["is_hidden"]:
                     new_hidden.append(rec)
@@ -600,12 +604,13 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                 c.execute("""
                     UPDATE products SET
                       title=?,price=?,status=?,release_date=?,limit_per=?,is_hidden=?,
-                      is_coming=?,reasons=?,matched=?,handle=?,last_seen=?,last_status=?
+                      is_coming=?,reasons=?,matched=?,handle=?,last_seen=?,last_status=?,
+                      image=COALESCE(NULLIF(?, ''), image)
                     WHERE id=?
                 """, (
                     rec["title"], rec["price"], rec["status"], rec["release_date"], rec["limit_per"],
                     rec["is_hidden"], rec["is_coming"], rec["reasons"], rec["matched"],
-                    rec["handle"], now, rec["status"], pid,
+                    rec["handle"], now, rec["status"], rec.get("image") or "", pid,
                 ))
 
     footer_time = aest_now_str()
@@ -885,7 +890,7 @@ async def api_results(request: Request, filter: str = Query("all"), source: str 
             "is_coming": bool(r["is_coming"]),
             "reasons": json.loads(r["reasons"] or "[]"),
             "matched": json.loads(r["matched"] or "[]"),
-            "handle": r["handle"], "url": product_url(dict(r)),
+            "handle": r["handle"], "url": product_url(dict(r)), "image": r["image"] or "",
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
         })
     return JSONResponse(out)
