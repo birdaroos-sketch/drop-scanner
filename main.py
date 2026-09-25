@@ -199,6 +199,14 @@ def init_db() -> None:
             """)
             c.execute("DROP TABLE products_old")
             print("[db] migrated products table to multi-source schema", flush=True)
+    # One-time cleanup: remove all BIG W rows so marketplace items don't persist.
+    # They will be re-discovered on the next scan with the marketplace filter active.
+    if get_meta("bigw_marketplace_purged", "") != "1":
+        with db_conn() as c2:
+            deleted = c2.execute("DELETE FROM products WHERE source='bigw'").rowcount
+            if deleted:
+                print(f"[db] purged {deleted} BIG W rows (marketplace filter migration)", flush=True)
+        set_meta("bigw_marketplace_purged", "1")
 
 
 def set_meta(key: str, value: str) -> None:
@@ -349,12 +357,17 @@ def _bigw_slug(name: str) -> str:
     return s or "product"
 
 
-def classify_bigw(hit: dict) -> dict:
-    """Normalize a BIG W search result into the same record shape as classify()."""
+def classify_bigw(hit: dict) -> dict | None:
+    """Normalize a BIG W search result into the same record shape as classify().
+    Returns None for marketplace (third-party seller) listings."""
     info   = hit.get("information") or {}
     attrs  = hit.get("attributes") or {}
     ful    = hit.get("fulfilment") or {}
     ident  = hit.get("identifiers") or {}
+
+    # Skip marketplace / third-party seller listings — website stock only
+    if (ful.get("logisticType") or "").upper() == "MARKETPLACE":
+        return None
     name   = info.get("name") or "—"
     sku    = str(ident.get("articleId") or ident.get("mpn") or "—")
 
@@ -554,7 +567,7 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             try:
                 for h in await fetch_bigw(client, q):
                     rec = classify_bigw(h)
-                    if keep(rec):
+                    if rec is not None and keep(rec):
                         merged[f"bigw:{rec['sku']}"] = rec
             except Exception as e:
                 msg = f"bigw '{q}': {type(e).__name__}: {e}"
