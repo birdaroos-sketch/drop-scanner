@@ -12,7 +12,8 @@ Architecture:
     empty DB.
   - Discord webhook fires when a NEW hidden SKU appears or a tracked SKU changes
     status (e.g. Embargo -> ComingSoon -> Available = the drop signal).
-  - Dashboard served from the same origin, so its fetch() to /api/* has no CORS.
+  - Dashboard lives in web/ (static). Served here at / and also deployable to Vercel,
+    where web/config.js points it at this API (CORS enabled via CORS_ORIGINS).
 
 Env vars (seed first-boot defaults; after that the dashboard is the source of truth):
   ALGOLIA_APP_ID     required   e.g. VTVKM5URPX
@@ -23,6 +24,7 @@ Env vars (seed first-boot defaults; after that the dashboard is the source of tr
   MAX_RESULTS        optional   per keyword query, default 200
   DISCORD_WEBHOOK    optional   full webhook URL for alerts
   DASHBOARD_TOKEN    optional   if set, dashboard + all write endpoints require ?token=...
+  CORS_ORIGINS       optional   comma-separated origins allowed to call the API, default *
 """
 
 import asyncio
@@ -40,7 +42,8 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 # ── static config (never editable at runtime) ───────────────────────────────
 
@@ -48,6 +51,8 @@ ALGOLIA_APP_ID  = os.environ.get("ALGOLIA_APP_ID", "").strip()
 ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "").strip()
 ALGOLIA_INDEX   = os.environ.get("ALGOLIA_INDEX", "shopify_products_families").strip()
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
+CORS_ORIGINS    = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+WEB_DIR         = Path(__file__).parent / "web"
 PORT            = int(os.environ.get("PORT", "8000"))
 
 # Railway gives a persistent volume mount at /data if you attach one; fall back to cwd.
@@ -714,6 +719,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Drop Scanner", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS,
+                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type"])
 
 
 def check_token(request: Request) -> None:
@@ -940,10 +947,13 @@ async def api_export_csv(request: Request, filter: str = Query("all"), source: s
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return DASHBOARD_HTML
+    return FileResponse(WEB_DIR / "index.html")
 
 
-from dashboard import DASHBOARD_HTML  # noqa: E402
+@app.get("/config.js")
+async def dashboard_config():
+    # Same-origin when served from here; web/config.js (Railway URL) is only for the Vercel copy.
+    return PlainTextResponse('window.API_BASE = "";\n', media_type="application/javascript")
 
 
 if __name__ == "__main__":

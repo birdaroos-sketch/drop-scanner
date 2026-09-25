@@ -1,10 +1,11 @@
-DASHBOARD_HTML = r"""<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0c0d10">
 <title>Drop Scanner</title>
+<script src="config.js"></script>
 <style>
 :root{
   --bg:#f4f5f7;--panel:#fff;--panel2:#f0f1f4;--line:#e3e5ea;--text:#15171c;--sub:#5d6371;--faint:#9aa0ac;
@@ -309,7 +310,8 @@ body.drawer-open .drawer{transform:none}
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
-const api = (path, extra) => path + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '') + (extra ? (TOKEN ? '&' : '?') + extra : '');
+const API_BASE = (window.API_BASE || '').replace(/\/+$/, '');
+const api = (path, extra) => API_BASE + path + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '') + (extra ? (TOKEN ? '&' : '?') + extra : '');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DAY = 864e5;
 
@@ -664,4 +666,3 @@ $('#clearBtn').onclick = async () => {
 </script>
 </body>
 </html>
-"""
