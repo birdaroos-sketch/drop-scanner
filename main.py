@@ -12,7 +12,8 @@ Architecture:
     empty DB.
   - Discord webhook fires when a NEW hidden SKU appears or a tracked SKU changes
     status (e.g. Embargo -> ComingSoon -> Available = the drop signal).
-  - Dashboard served from the same origin, so its fetch() to /api/* has no CORS.
+  - Dashboard lives in web/ (static). Served here at / and also deployable to Vercel,
+    where web/config.js points it at this API (CORS enabled via CORS_ORIGINS).
 
 Env vars (seed first-boot defaults; after that the dashboard is the source of truth):
   ALGOLIA_APP_ID     required   e.g. VTVKM5URPX
@@ -23,6 +24,7 @@ Env vars (seed first-boot defaults; after that the dashboard is the source of tr
   MAX_RESULTS        optional   per keyword query, default 200
   DISCORD_WEBHOOK    optional   full webhook URL for alerts
   DASHBOARD_TOKEN    optional   if set, dashboard + all write endpoints require ?token=...
+  CORS_ORIGINS       optional   comma-separated origins allowed to call the API, default *
 """
 
 import asyncio
@@ -40,7 +42,8 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 # ── static config (never editable at runtime) ───────────────────────────────
 
@@ -48,6 +51,8 @@ ALGOLIA_APP_ID  = os.environ.get("ALGOLIA_APP_ID", "").strip()
 ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "").strip()
 ALGOLIA_INDEX   = os.environ.get("ALGOLIA_INDEX", "shopify_products_families").strip()
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
+CORS_ORIGINS    = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+WEB_DIR         = Path(__file__).parent / "web"
 PORT            = int(os.environ.get("PORT", "8000"))
 
 # Railway gives a persistent volume mount at /data if you attach one; fall back to cwd.
@@ -168,7 +173,8 @@ def _create_products(c: sqlite3.Connection) -> None:
             handle        TEXT,
             first_seen    TEXT,
             last_seen     TEXT,
-            last_status   TEXT
+            last_status   TEXT,
+            image         TEXT
         )
     """)
 
@@ -181,6 +187,7 @@ def init_db() -> None:
         ).fetchone()
         if not exists:
             _create_products(c)
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('bigw_marketplace_purged','1')")
             return
         cols = [r[1] for r in c.execute("PRAGMA table_info(products)")]
         if "id" not in cols:
@@ -199,6 +206,16 @@ def init_db() -> None:
             """)
             c.execute("DROP TABLE products_old")
             print("[db] migrated products table to multi-source schema", flush=True)
+        if "image" not in [r[1] for r in c.execute("PRAGMA table_info(products)")]:
+            c.execute("ALTER TABLE products ADD COLUMN image TEXT")
+    # One-time cleanup: remove all BIG W rows so marketplace items don't persist.
+    # They will be re-discovered on the next scan with the marketplace filter active.
+    if get_meta("bigw_marketplace_purged", "") != "1":
+        with db_conn() as c2:
+            deleted = c2.execute("DELETE FROM products WHERE source='bigw'").rowcount
+            if deleted:
+                print(f"[db] purged {deleted} BIG W rows (marketplace filter migration)", flush=True)
+        set_meta("bigw_marketplace_purged", "1")
 
 
 def set_meta(key: str, value: str) -> None:
@@ -349,12 +366,17 @@ def _bigw_slug(name: str) -> str:
     return s or "product"
 
 
-def classify_bigw(hit: dict) -> dict:
-    """Normalize a BIG W search result into the same record shape as classify()."""
+def classify_bigw(hit: dict) -> dict | None:
+    """Normalize a BIG W search result into the same record shape as classify().
+    Returns None for marketplace (third-party seller) listings."""
     info   = hit.get("information") or {}
     attrs  = hit.get("attributes") or {}
     ful    = hit.get("fulfilment") or {}
     ident  = hit.get("identifiers") or {}
+
+    # Skip marketplace / third-party seller listings — website stock only
+    if (ful.get("logisticType") or "").upper() == "MARKETPLACE":
+        return None
     name   = info.get("name") or "—"
     sku    = str(ident.get("articleId") or ident.get("mpn") or "—")
 
@@ -554,7 +576,7 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
             try:
                 for h in await fetch_bigw(client, q):
                     rec = classify_bigw(h)
-                    if keep(rec):
+                    if rec is not None and keep(rec):
                         merged[f"bigw:{rec['sku']}"] = rec
             except Exception as e:
                 msg = f"bigw '{q}': {type(e).__name__}: {e}"
@@ -571,12 +593,12 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                 c.execute("""
                     INSERT INTO products
                     (id,source,sku,title,price,status,release_date,limit_per,is_hidden,is_coming,
-                     reasons,matched,handle,first_seen,last_seen,last_status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     reasons,matched,handle,first_seen,last_seen,last_status,image)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     pid, rec["source"], rec["sku"], rec["title"], rec["price"], rec["status"],
                     rec["release_date"], rec["limit_per"], rec["is_hidden"], rec["is_coming"],
-                    rec["reasons"], rec["matched"], rec["handle"], now, now, rec["status"],
+                    rec["reasons"], rec["matched"], rec["handle"], now, now, rec["status"], rec.get("image") or "",
                 ))
                 if rec["is_hidden"]:
                     new_hidden.append(rec)
@@ -587,12 +609,13 @@ async def run_one_scan(client: httpx.AsyncClient) -> None:
                 c.execute("""
                     UPDATE products SET
                       title=?,price=?,status=?,release_date=?,limit_per=?,is_hidden=?,
-                      is_coming=?,reasons=?,matched=?,handle=?,last_seen=?,last_status=?
+                      is_coming=?,reasons=?,matched=?,handle=?,last_seen=?,last_status=?,
+                      image=COALESCE(NULLIF(?, ''), image)
                     WHERE id=?
                 """, (
                     rec["title"], rec["price"], rec["status"], rec["release_date"], rec["limit_per"],
                     rec["is_hidden"], rec["is_coming"], rec["reasons"], rec["matched"],
-                    rec["handle"], now, rec["status"], pid,
+                    rec["handle"], now, rec["status"], rec.get("image") or "", pid,
                 ))
 
     footer_time = aest_now_str()
@@ -696,6 +719,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Drop Scanner", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS,
+                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type"])
 
 
 def check_token(request: Request) -> None:
@@ -872,7 +897,7 @@ async def api_results(request: Request, filter: str = Query("all"), source: str 
             "is_coming": bool(r["is_coming"]),
             "reasons": json.loads(r["reasons"] or "[]"),
             "matched": json.loads(r["matched"] or "[]"),
-            "handle": r["handle"], "url": product_url(dict(r)),
+            "handle": r["handle"], "url": product_url(dict(r)), "image": r["image"] or "",
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
         })
     return JSONResponse(out)
@@ -922,10 +947,13 @@ async def api_export_csv(request: Request, filter: str = Query("all"), source: s
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return DASHBOARD_HTML
+    return FileResponse(WEB_DIR / "index.html")
 
 
-from dashboard import DASHBOARD_HTML  # noqa: E402
+@app.get("/config.js")
+async def dashboard_config():
+    # Same-origin when served from here; web/config.js (Railway URL) is only for the Vercel copy.
+    return PlainTextResponse('window.API_BASE = "";\n', media_type="application/javascript")
 
 
 if __name__ == "__main__":
