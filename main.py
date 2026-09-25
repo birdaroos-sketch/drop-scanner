@@ -360,6 +360,40 @@ async def fetch_bigw(client: httpx.AsyncClient, query: str) -> list[dict]:
     return ((data.get("organic") or {}).get("results")) or []
 
 
+async def _bigw_diagnostic(client: httpx.AsyncClient) -> None:
+    """Temporary: log BIG W fields that could identify marketplace sellers."""
+    pat = re.compile(r"seller|market|vendor|logistic|offer|partner|dropship|ship|fulfil|source|channel|supplier|type", re.I)
+    def leaves(o, path=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                yield from leaves(v, f"{path}.{k}" if path else k)
+        elif isinstance(o, list):
+            for i, v in enumerate(o[:3]):
+                yield from leaves(v, f"{path}[{i}]")
+        else:
+            yield path, o
+    try:
+        payload = {"format": "1", "clientId": "web", "sessionId": "drop-scanner", "page": 0, "perPage": 60,
+                   "sort": "relevance", "text": "pokemon", "filter": {"inStock": False},
+                   "include": {"facets": True, "additionalFacets": [], "suggestions": False}}
+        headers = {"Content-Type": "application/json", "Origin": BIGW_BASE,
+                   "Referer": BIGW_BASE + "/", "User-Agent": BIGW_UA}
+        r = await client.post(BIGW_SEARCH_URL, json=payload, headers=headers, timeout=20)
+        data = r.json()
+        print(f"[diag] top-level keys: {list(data.keys())}", flush=True)
+        facets = data.get("facets") or []
+        print(f"[diag] facets: {json.dumps(facets)[:1500]}", flush=True)
+        hits = ((data.get("organic") or {}).get("results")) or []
+        if hits:
+            print(f"[diag] hit keys: {sorted(hits[0].keys())}", flush=True)
+        for h in hits:
+            name = ((h.get("information") or {}).get("name") or "")[:60]
+            fields = {p: v for p, v in leaves(h) if pat.search(p) and v not in (None, "", [], {})}
+            print(f"[diag] {name} :: {json.dumps(fields)[:700]}", flush=True)
+    except Exception as e:
+        print(f"[diag] failed: {type(e).__name__}: {e}", flush=True)
+
+
 def _bigw_slug(name: str) -> str:
     s = _norm(name).lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
@@ -711,6 +745,10 @@ async def lifespan(app: FastAPI):
         yield
         return
     task = asyncio.create_task(scan_loop())
+    async def _diag():
+        async with httpx.AsyncClient() as c:
+            await _bigw_diagnostic(c)
+    asyncio.create_task(_diag())
     print(f"[boot] scan loop started — every {config['interval']}s, sources={active_sources()}, "
           f"keywords={config['keywords']}, neg_keywords={config['neg_keywords']}, "
           f"paused={config['paused']}, manual_only={config['manual_only']}", flush=True)
