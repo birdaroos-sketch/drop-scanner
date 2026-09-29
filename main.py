@@ -869,6 +869,63 @@ async def api_test_discord(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/alert")
+async def api_alert(request: Request):
+    """Send one or more existing products to the Discord webhook on demand.
+
+    Body (JSON): {"ids": ["jbhifi:530312", ...]}  — specific product ids
+    OR:          {"filter": "all"|"hidden"|"coming", "source": "all"|"jbhifi"|"bigw"}
+    """
+    check_token(request)
+    if not config["webhook"]:
+        raise HTTPException(status_code=400, detail="no webhook configured")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    ids: list[str] | None = body.get("ids")
+    with db_conn() as c:
+        if ids:
+            rows = []
+            for pid in ids:
+                r = c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+                if r:
+                    rows.append(r)
+        else:
+            filter_val = body.get("filter", "all")
+            source_val = body.get("source", "all")
+            where, params = _results_where(filter_val, source_val)
+            rows = c.execute(
+                f"SELECT * FROM products {where} ORDER BY last_seen DESC", params
+            ).fetchall()
+
+    if not rows:
+        return {"ok": True, "sent": 0, "message": "no matching products found"}
+
+    footer_time = aest_now_str()
+    sent = 0
+    async with httpx.AsyncClient() as client:
+        for r in rows:
+            rec = {
+                "source": r["source"], "sku": r["sku"], "title": r["title"],
+                "price": r["price"], "status": r["status"], "is_hidden": r["is_hidden"],
+                "limit_per": r["limit_per"], "handle": r["handle"], "image": r["image"] or "",
+                "matched": r["matched"],
+            }
+            is_drop = (rec["status"] or "").lower() in ("available", "instock")
+            color = COLOR_DROP if is_drop else (COLOR_HIDDEN if rec["is_hidden"] else COLOR_CHANGE)
+            await discord_post(
+                client,
+                f"📣 **{rec['title'][:80]}** — manual alert",
+                [build_embed(rec, color, footer_time)],
+            )
+            sent += 1
+            await asyncio.sleep(0.35)
+
+    return {"ok": True, "sent": sent}
+
+
 def _results_where(filter: str, source: str) -> tuple[str, list]:
     clauses, params = [], []
     if filter == "hidden":   clauses.append("is_hidden=1")
