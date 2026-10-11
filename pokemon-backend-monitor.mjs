@@ -14,7 +14,6 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
-import { createServer } from "http";
 
 // ---------------- config ----------------
 const WEBHOOK = process.env.DISCORD_WEBHOOK || "";
@@ -166,6 +165,14 @@ function diffItem(prev, cur) {
   }
   return out;
 }
+function diffStruct(prev, cur) {
+  const out = [];
+  for (const k of Object.keys(cur)) {
+    if (k.startsWith("_")) continue;
+    if (JSON.stringify(prev ? prev[k] : undefined) !== JSON.stringify(cur[k])) out.push({ f: k, from: fmt(prev && prev[k]), to: fmt(cur[k]) });
+  }
+  return out;
+}
 
 async function send(content) {
   if (!WEBHOOK) return;
@@ -184,39 +191,98 @@ const saveState = (s) => { try { writeFileSync(STATE_FILE, JSON.stringify(s, nul
 let state = loadState();
 const firstRun = Object.keys(state).length === 0;
 
-// tiny status server so Railway sees a bound port; also a live status page.
-const status = { service: "pokemon-backend-monitor", startedAt: new Date().toISOString(), lastTick: null, watched: JB_SKUS.length + Object.keys(KMART_SKUS).length, lastChanges: 0, webhook: WEBHOOK ? "set" : "missing" };
-createServer((req, res) => {
-  if (req.url === "/state") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(state, null, 2)); }
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify(status, null, 2));
-}).listen(process.env.PORT || 3000, () => console.log(`status server on :${process.env.PORT || 3000}`));
+// ---------------- monitors + API shape ----------------
+const MONITORS = [
+  { id: "jb-mega",   name: "JB — Mega Ascended Heroes", src: "JB", kw: ["ascended heroes","focused fighters","premium collection","mega evolutions 2.5"], skus: ["916270","879703","879778","900731"], fields: ["price","availability","canBuyOnline","limitPerOrder","title","releaseDate"] },
+  { id: "jb-30th",   name: "JB — 30th Celebration",     src: "JB", kw: ["30th celebration","elite trainer box","booster bundle","ultra premium"], skus: ["900807","900814","900803","900809","900810","900804","900805","900806","900815","900816","900817","900818","900819"], fields: ["price","availability","canBuyOnline","overallStatus","releaseDate"] },
+  { id: "jb-sparks", name: "JB — Surging Sparks",       src: "JB", kw: ["surging sparks","scarlet & violet","booster"], skus: ["780158"], fields: ["price","availability","canBuyOnline"] },
+  { id: "km-ah",     name: "Kmart — Ascended Heroes",   src: "KM", kw: ["ascended heroes","pokemon tcg","booster","tin"], skus: ["43718733","43814121","43860685"], fields: ["priceService","homeDeliveryStock","clickCollectStock","storefrontIndexed","catalogueTitle"] },
+];
+const monId = (src, sku) => (MONITORS.find((m) => m.src === src && m.skus.includes(sku)) || {}).id || (src === "KM" ? "km-ah" : "jb-mega");
+const shorten = (t) => (t || "").replace(/^Pok[eé]mon TCG - (Mega Evolutions 2\.5:? )?/i, "").replace(/\s*\(?card game\)?$/i, "").trim();
 
+function toProduct(key, v) {
+  const [src, sku] = key.split(":");
+  if (src === "JB") {
+    return { key, src: "JB", sku, nm: shorten(v.title || v._label), price: v.price ?? null, was: v.wasPrice ?? null,
+      status: v.overallStatus ?? "?", avail: v.availableNow ?? "", buy: !!v.canBuyOnline, pre: !!v.canPreOrder,
+      rel: v.releaseDate ? String(v.releaseDate).slice(0, 10) : null, cat: v.category ?? null, img: v.firstImage ?? null, mon: monId("JB", sku) };
+  }
+  const price = typeof v.priceService === "string" && v.priceService.startsWith("$") ? Number(v.priceService.slice(1)) : null;
+  const idx = !!v.storefrontIndexed, hd = v.homeDeliveryStock ?? 0, cnc = v.clickCollectStock ?? 0;
+  return { key, src: "KM", sku, nm: (v.catalogueTitle || (v._label || "").replace(/^Kmart · /, "")),
+    price, was: null, status: v.priceService === "notfound" ? "NotFound" : "NoLongerAvailable",
+    avail: idx ? `Indexed · ${hd} stock` : "Not yet indexed", buy: hd > 0, pre: false, rel: null, cat: "TCG", img: null,
+    mon: monId("KM", sku), hd, cnc, idx };
+}
+const snapshotProducts = () => Object.entries(state).filter(([k]) => k.includes(":")).map(([k, v]) => toProduct(k, v));
+
+// ---------------- tick ----------------
+let lastTick = null, lastChanges = [], ticking = false;
 async function tick() {
+  if (ticking) return { ran: 0, changes: [] };
+  ticking = true;
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 19);
   let snap = {};
   try { const [jb, km] = await Promise.all([jbSnapshot(), kmartSnapshot()]); snap = { ...jb, ...km }; }
-  catch (e) { console.log(`[${stamp}] poll error: ${e.message}`); return; }
+  catch (e) { console.log(`[${stamp}] poll error: ${e.message}`); ticking = false; return { ran: 0, changes: [], error: e.message }; }
 
-  const alerts = [];
+  const alerts = [], changes = [];
   for (const [key, cur] of Object.entries(snap)) {
     const prev = state[key];
-    const changes = diffItem(prev, cur);
-    if (prev && changes.length) alerts.push(`🔔 **${cur._label}** (${key.split(":")[1]})\n${changes.join("\n")}\n${cur._url}`);
+    const lines = diffItem(prev, cur);
+    if (prev && lines.length) {
+      alerts.push(`🔔 **${cur._label}** (${key.split(":")[1]})\n${lines.join("\n")}\n${cur._url}`);
+      const p = toProduct(key, cur);
+      changes.push({ key, nm: p.nm, sku: p.sku, src: p.src, mon: p.mon, diff: diffStruct(prev, cur), ts: Date.now() });
+    }
     state[key] = cur;
   }
   saveState(state);
+  lastTick = Date.now();
+  if (changes.length) lastChanges = [...changes, ...lastChanges].slice(0, 100);
 
-  status.lastTick = stamp; status.lastChanges = alerts.length;
   if (alerts.length) await postDiscord([`⚡ ${alerts.length} change(s) @ ${stamp}`, ...alerts]);
   else console.log(`[${stamp}] ${Object.keys(snap).length} watched · no changes`);
+  ticking = false;
+  return { ran: Object.keys(snap).length, changes };
 }
 
+// ---------------- HTTP server (dashboard + API) ----------------
+import { createServer } from "http";
+const DASH = fileURLToPath(new URL("./dashboard.html", import.meta.url));
+const PORT = Number(process.env.PORT || 8080);
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type", "access-control-allow-methods": "GET,POST,OPTIONS" };
+const json = (res, code, obj) => { res.writeHead(code, { "content-type": "application/json", ...CORS }); res.end(JSON.stringify(obj)); };
+function apiSnapshot() {
+  return {
+    products: snapshotProducts(),
+    monitors: MONITORS.map((m) => ({ id: m.id, name: m.name, src: m.src, kw: m.kw, fields: m.fields, interval: Math.round(INTERVAL_MS / 1000), auto: true, skuCount: m.skus.length, lastRun: lastTick })),
+    changes: lastChanges,
+    meta: { interval: Math.round(INTERVAL_MS / 1000), lastTick, nextTick: lastTick ? lastTick + INTERVAL_MS : null, discord: !!WEBHOOK, watching: Object.keys(state).length, postcode: KMART_POSTCODE, now: Date.now() },
+  };
+}
+createServer(async (req, res) => {
+  const u = new URL(req.url, "http://x");
+  if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
+  try {
+    if (u.pathname === "/healthz") return json(res, 200, { ok: true, watching: Object.keys(state).length, lastTick });
+    if (u.pathname === "/api/snapshot") return json(res, 200, apiSnapshot());
+    if (u.pathname === "/api/run" && req.method === "POST") { const r = await tick(); return json(res, 200, { ...apiSnapshot(), ran: r.ran, justChanged: r.changes }); }
+    if (u.pathname === "/" || u.pathname === "/index.html" || u.pathname === "/dashboard.html") {
+      let html; try { html = readFileSync(DASH, "utf8"); } catch { return json(res, 500, { error: "dashboard missing" }); }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(html);
+    }
+    return json(res, 404, { error: "not found" });
+  } catch (e) { return json(res, 500, { error: e.message }); }
+}).listen(PORT, "0.0.0.0", () => console.log(`HTTP console on :${PORT} · dashboard + /api/snapshot + POST /api/run`));
+
+// ---------------- boot ----------------
 console.log(`Pokemon backend monitor — JB:${JB_SKUS.length} Kmart:${Object.keys(KMART_SKUS).length} · every ${Math.round(INTERVAL_MS / 1000)}s · ${WEBHOOK ? "Discord ON" : "console only"}`);
 if (firstRun) {
   console.log("First run: capturing baseline (no change alerts this tick).");
   await tick();
-  await send(`✅ Pokemon backend monitor live — watching ${JB_SKUS.length} JB + ${Object.keys(KMART_SKUS).length} Kmart SKUs every ${Math.round(INTERVAL_MS / 1000)}s. Baseline captured; you'll get pinged on ANY field change (price, stock, availability, limit, title, link, barcode, release date, reviews, etc).`);
+  await send(`✅ Pokemon backend monitor live — watching ${JB_SKUS.length} JB + ${Object.keys(KMART_SKUS).length} Kmart SKUs every ${Math.round(INTERVAL_MS / 1000)}s. Baseline captured; you'll get pinged on ANY field change.`);
 } else { await tick(); }
 if (process.env.ONCE) process.exit(0);
 setInterval(tick, INTERVAL_MS);
