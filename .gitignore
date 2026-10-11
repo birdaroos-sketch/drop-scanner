@@ -1,6 +1,2 @@
-.venv/
-__pycache__/
-*.pyc
-scanner.db
-scanner.db-journal
-*.db
+.monitor-state.json
+node_modules/
