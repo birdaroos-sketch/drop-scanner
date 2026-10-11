@@ -14,6 +14,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { createServer } from "http";
 
 // ---------------- config ----------------
 const WEBHOOK = process.env.DISCORD_WEBHOOK || "";
@@ -183,6 +184,14 @@ const saveState = (s) => { try { writeFileSync(STATE_FILE, JSON.stringify(s, nul
 let state = loadState();
 const firstRun = Object.keys(state).length === 0;
 
+// tiny status server so Railway sees a bound port; also a live status page.
+const status = { service: "pokemon-backend-monitor", startedAt: new Date().toISOString(), lastTick: null, watched: JB_SKUS.length + Object.keys(KMART_SKUS).length, lastChanges: 0, webhook: WEBHOOK ? "set" : "missing" };
+createServer((req, res) => {
+  if (req.url === "/state") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(state, null, 2)); }
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(status, null, 2));
+}).listen(process.env.PORT || 3000, () => console.log(`status server on :${process.env.PORT || 3000}`));
+
 async function tick() {
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 19);
   let snap = {};
@@ -198,6 +207,7 @@ async function tick() {
   }
   saveState(state);
 
+  status.lastTick = stamp; status.lastChanges = alerts.length;
   if (alerts.length) await postDiscord([`⚡ ${alerts.length} change(s) @ ${stamp}`, ...alerts]);
   else console.log(`[${stamp}] ${Object.keys(snap).length} watched · no changes`);
 }
